@@ -1,0 +1,2 @@
+# Compatibility alias. The project is GPU-only.
+-r requirements.txt

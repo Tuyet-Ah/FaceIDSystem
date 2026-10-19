@@ -1,0 +1,2 @@
+print(TEMPLATE_DIR)
+print(STATIC_DIR)
