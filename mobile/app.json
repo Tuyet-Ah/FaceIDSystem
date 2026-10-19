@@ -1,0 +1,53 @@
+{
+  "expo": {
+    "name": "FaceID Điểm danh",
+    "slug": "faceid-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "bundleIdentifier": "com.avtvn.faceid",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Cho phép FaceID kết nối máy chủ trong mạng nội bộ.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.avtvn.faceid",
+      "permissions": [
+        "CAMERA"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Cho phép FaceID chụp ảnh để điểm danh.",
+          "photosPermission": "Cho phép FaceID chọn ảnh để đăng ký khuôn mặt và nhận diện.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Cho phép FaceID mở camera để nhận diện trực tiếp.",
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-status-bar",
+      "expo-font",
+      "expo-asset"
+    ]
+  }
+}
