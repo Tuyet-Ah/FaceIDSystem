@@ -1,0 +1,10 @@
+{
+  "description": "Manage employee records efficiently with a responsive interface, allowing for easy registration, viewing, and deletion of employee data in a FaceID Management System.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
