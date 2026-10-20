@@ -87,6 +87,7 @@ export default function EmployeeFormScreen({
         onSaved();
       } catch (e) {
         if (e instanceof ApiError) setImageErrors(e.imageErrors);
+        scroll.current?.scrollTo({ y: 0, animated: true });
         throw e;
       }
     });

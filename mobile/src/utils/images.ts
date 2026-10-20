@@ -19,7 +19,7 @@ export async function pickImages(camera: boolean, multiple = false) {
   }
   const options: ImagePicker.ImagePickerOptions = {
     mediaTypes: ["images"],
-    quality: 0.9,
+    quality: 1,
     allowsMultipleSelection: multiple,
     selectionLimit: multiple ? 10 : 1,
   };

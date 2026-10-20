@@ -259,7 +259,26 @@ test("API propagates cancellation and bounds stalled requests", async () => {
   const controller = new AbortController();
   const work = pending.request("http://localhost:5000", "/health", { signal: controller.signal });
   controller.abort();
-  await assert.rejects(work, /cancelled/);
+  await assert.rejects(work, /đã được hủy/);
+});
+
+test("request finishes even when native response body ignores abort", async () => {
+  const { request, ApiError } = loadModule("src/services/client.ts", {
+    fetch: async () => ({ status: 422, ok: false, text: () => new Promise(() => {}) }),
+    setTimeout: (callback) => setTimeout(callback, 10),
+  });
+  await assert.rejects(request("http://localhost:5000", "/employees"), (error) => {
+    assert.ok(error instanceof ApiError);
+    assert.equal(error.status, 422);
+    return true;
+  });
+});
+
+test("request timeout also works when transport ignores AbortSignal", async () => {
+  const { request } = loadModule("src/services/client.ts", {
+    fetch: () => new Promise(() => {}),
+  });
+  await assert.rejects(request("http://localhost:5000", "/health", { timeout: 5 }), /quá lâu/);
 });
 
 test("live capture loop waits for slow requests and cancels pending work", async () => {

@@ -59,19 +59,50 @@ export async function request<T>(
   options: RequestOptions = {},
 ): Promise<T> {
   const controller = new AbortController();
-  const cancel = () => controller.abort();
-  if (options.signal?.aborted) controller.abort();
+  let rejectAbort: (reason: Error) => void = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAbort = reject;
+  });
+  const cancel = () => {
+    controller.abort();
+    rejectAbort(
+      new Error(
+        options.signal?.aborted
+          ? "Yêu cầu đã được hủy."
+          : "Máy chủ phản hồi quá lâu. Vui lòng thử lại.",
+      ),
+    );
+  };
   options.signal?.addEventListener("abort", cancel);
   const timer = setTimeout(cancel, options.timeout ?? (options.body ? 120_000 : 15_000));
   try {
-    const response = await fetch(`${server}/api${path}`, {
-      method: options.method ?? "GET",
-      body: options.body,
-      signal: controller.signal,
-      headers: { Accept: "application/json" },
-    });
+    if (options.signal?.aborted) cancel();
+    const response = await Promise.race([
+      fetch(`${server}/api${path}`, {
+        method: options.method ?? "GET",
+        body: options.body,
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      }),
+      aborted,
+    ]);
     if (response.status === 204) return undefined as T;
-    const text = await response.text();
+    // Bound body reads too: some native transports can stall after receiving headers.
+    const bodyTimer = setTimeout(cancel, 15_000);
+    let text: string;
+    try {
+      text = await Promise.race([response.text(), aborted]);
+    } catch (error) {
+      if (!response.ok && !options.signal?.aborted) {
+        throw new ApiError(
+          `Máy chủ từ chối yêu cầu (HTTP ${response.status}), nhưng không đọc được chi tiết lỗi.`,
+          response.status,
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(bodyTimer);
+    }
     let data;
     try {
       data = JSON.parse(text);
@@ -89,6 +120,7 @@ export async function request<T>(
       );
     return data as T;
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     if (options.signal?.aborted) throw error;
     if (controller.signal.aborted) throw new Error("Máy chủ phản hồi quá lâu. Vui lòng thử lại.");
     if (error instanceof TypeError)
