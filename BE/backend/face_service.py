@@ -1,4 +1,5 @@
 import os
+import io
 import pickle
 import threading
 from pathlib import Path
@@ -83,6 +84,18 @@ class FaceService:
 
         encoded = np.frombuffer(image_bytes, dtype=np.uint8)
         image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if image is None:
+            # OpenCV wheels do not decode iPhone HEIC/HEIF images.
+            from PIL import Image, ImageOps, UnidentifiedImageError
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+            try:
+                with Image.open(io.BytesIO(image_bytes)) as source:
+                    rgb = ImageOps.exif_transpose(source).convert("RGB")
+                    image = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
+            except (UnidentifiedImageError, OSError, ValueError):
+                image = None
         if image is None:
             raise FaceValidationError("Không đọc được ảnh")
 

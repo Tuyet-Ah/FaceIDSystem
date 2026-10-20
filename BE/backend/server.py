@@ -27,7 +27,7 @@ EMBEDDINGS_PATH = Path(os.getenv(
 ))
 MIN_FACE_IMAGES = 5
 MAX_FACE_IMAGES = 10
-ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "heic", "heif"}
 CAMERA_INDEX = int(os.getenv("FACEID_CAMERA_INDEX", "0"))
 CAMERA_SCAN_EVERY_FRAMES = int(os.getenv("FACEID_CAMERA_SCAN_EVERY_FRAMES", "3"))
 CAMERA_CONFIRM_SCANS = int(os.getenv("FACEID_CAMERA_CONFIRM_SCANS", "2"))
