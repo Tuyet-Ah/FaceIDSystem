@@ -97,7 +97,10 @@ class FaceService:
         if strict_quality and not 30 <= brightness <= 230:
             raise FaceValidationError("Ảnh quá tối hoặc quá sáng")
         if strict_quality and blur_score < 35:
-            raise FaceValidationError("Ảnh bị mờ, vui lòng chọn ảnh rõ hơn")
+            raise FaceValidationError(
+                f"Ảnh bị mờ (điểm độ nét {blur_score:.2f}, yêu cầu tối thiểu 35). "
+                "Vui lòng chọn ảnh rõ hơn"
+            )
 
         faces = self._detect_faces(image)
         if not faces:
