@@ -155,7 +155,7 @@ export default function RecognitionPage() {
             )}
             <label className="action-button flex cursor-pointer items-center gap-2">
               <ImageUp size={20} /> UPLOAD PHOTO
-              <input type="file" accept="image/*" className="hidden" onChange={upload} />
+              <input type="file" accept="image/*,.heic,.heif" className="hidden" onChange={upload} />
             </label>
           </div>
           {cameras.length > 1 && (

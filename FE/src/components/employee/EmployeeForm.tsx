@@ -50,7 +50,9 @@ export default function EmployeeForm({ employee, onCancel, onSave }: Props) {
 
   const upload = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = Array.from(event.target.files ?? []);
-    const accepted = selected.filter((file) => file.type.startsWith("image/") && file.size <= 10 * 1024 * 1024);
+    const accepted = selected.filter((file) =>
+      (file.type.startsWith("image/") || /\.(heic|heif)$/i.test(file.name)) && file.size <= 10 * 1024 * 1024,
+    );
     const merged = [...images, ...accepted];
     const unique = merged.filter((file, index, all) =>
       all.findIndex((item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified) === index,
@@ -131,7 +133,7 @@ export default function EmployeeForm({ employee, onCancel, onSave }: Props) {
         ))}
       </div>
       <div className="flex flex-col gap-4 py-2">
-        <input ref={inputRef} className="hidden" type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={upload} />
+        <input ref={inputRef} className="hidden" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" multiple onChange={upload} />
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
@@ -152,7 +154,8 @@ export default function EmployeeForm({ employee, onCancel, onSave }: Props) {
               key={`${images[index].name}-${images[index].size}`}
               className={`group relative aspect-square overflow-hidden rounded-lg bg-slate-100 ${primaryImageIndex === index ? "ring-4 ring-amber-400 ring-inset" : ""}`}
             >
-              <img src={preview} alt={`Face ${index + 1}`} className="size-full object-cover" />
+              <img src={preview} alt={`Face ${index + 1}`} className="size-full object-cover" onError={(event) => { event.currentTarget.style.visibility = "hidden"; }} />
+              <span className="absolute bottom-0 left-0 right-0 truncate bg-white/90 px-2 py-1 text-xs" title={images[index].name}>{images[index].name}</span>
               <button
                 type="button"
                 aria-label={`Use image ${index + 1} as profile photo`}

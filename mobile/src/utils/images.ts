@@ -28,8 +28,22 @@ export async function pickImages(camera: boolean, multiple = false) {
     : await ImagePicker.launchImageLibraryAsync(options);
   if (result.canceled) return null;
   for (const image of result.assets) {
-    if (image.mimeType && !["image/jpeg", "image/png", "image/webp"].includes(image.mimeType)) {
-      throw new Error("Chỉ hỗ trợ ảnh JPEG, PNG và WebP");
+    const mimeType = image.mimeType?.toLowerCase();
+    const isHeif = /\.(heic|heif)$/i.test(image.fileName ?? image.uri.split(/[?#]/)[0]);
+    if (
+      mimeType &&
+      ![
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/heic",
+        "image/heif",
+        "image/heic-sequence",
+        "image/heif-sequence",
+      ].includes(mimeType) &&
+      !isHeif
+    ) {
+      throw new Error("Chỉ hỗ trợ ảnh JPEG, PNG, WebP, HEIC và HEIF");
     }
     if (image.fileSize && image.fileSize > 10 * 1024 * 1024)
       throw new Error("Mỗi ảnh tối đa 10 MB");
