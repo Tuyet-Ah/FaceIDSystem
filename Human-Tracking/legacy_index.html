@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Legacy Human Tracking</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; min-height: 100vh; background: #0f1220; color: #e8eaf2; font-family: "Segoe UI", sans-serif; }
+    .wrap { max-width: 1050px; margin: auto; }
+    .head { display: flex; justify-content: space-between; align-items: end; margin-bottom: 18px; gap: 15px; }
+    h1 { margin: 0; font-size: 23px; }
+    .tag { color: #8b93b0; font-size: 12px; }
+    a.tag { color: #91a7ff; text-decoration: none; }
+    .bar { display: flex; gap: 10px; margin-bottom: 18px; }
+    input { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 8px; border: 1px solid #303653; background: #191d33; color: white; outline: none; }
+    input:focus { border-color: #5c7cfa; }
+    button { border: 0; border-radius: 8px; padding: 12px 20px; background: #4c6ef5; color: white; font-weight: 700; cursor: pointer; }
+    button.stop { background: #c92a2a; }
+    button:disabled { opacity: .45; cursor: default; }
+    .stage { min-height: 360px; display: grid; place-items: center; overflow: hidden; background: #050609; border: 1px solid #292e47; border-radius: 10px; }
+    #video { width: 100%; display: none; }
+    #placeholder { color: #68708f; padding: 35px; text-align: center; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 16px; }
+    .card { background: #191d33; border: 1px solid #2b3050; border-radius: 10px; padding: 15px 17px; }
+    .label { color: #8b93b0; text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
+    .value { color: #69db7c; font-size: 29px; font-weight: 750; margin-top: 4px; }
+    .status { min-height: 20px; margin-top: 13px; color: #9299b4; font-size: 13px; }
+    .status.error { color: #ff6b6b; }
+    @media (max-width: 650px) { body { padding: 14px; } .bar { flex-wrap: wrap; } .bar input { flex-basis: 100%; } .stats { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head"><div><h1>Human Tracking</h1><div class="tag">Bản cũ · YOLO + TrackTrack + ReID</div></div><a id="analysisLink" class="tag" target="_blank">Mở phân tích mới :8009</a></div>
+    <div class="bar">
+      <input id="url" placeholder="Đường dẫn video local hoặc URL..." />
+      <button id="start">Bắt đầu</button>
+      <button id="stop" class="stop" disabled>Dừng</button>
+    </div>
+    <div class="stage"><div id="placeholder">Nhập video để xem tracking ID trực tiếp.</div><img id="video" alt="MJPEG tracking stream" /></div>
+    <div class="stats">
+      <div class="card"><div class="label">Người trong khung</div><div id="current" class="value">0</div></div>
+      <div class="card"><div class="label">Tổng ID duy nhất</div><div id="unique" class="value">0</div></div>
+      <div class="card"><div class="label">Tốc độ xử lý</div><div id="fps" class="value">0.0</div></div>
+    </div>
+    <div id="status" class="status"></div>
+  </div>
+  <script>
+    const url = document.getElementById("url");
+    const start = document.getElementById("start");
+    const stop = document.getElementById("stop");
+    const stream = document.getElementById("video");
+    const placeholder = document.getElementById("placeholder");
+    const status = document.getElementById("status");
+    document.getElementById("analysisLink").href = `${location.protocol}//${location.hostname}:8009`;
+    const defaultUrl = __DEFAULT_URL__;
+    if (defaultUrl) url.value = defaultUrl;
+    let timer = null;
+
+    function setState(running) { start.disabled = running; stop.disabled = !running; }
+    function setStatus(text, error = false) { status.textContent = text; status.classList.toggle("error", error); }
+    function stopPolling() { if (timer) clearInterval(timer); timer = null; }
+    async function poll() {
+      try {
+        const data = await (await fetch("/api/count")).json();
+        document.getElementById("current").textContent = data.current;
+        document.getElementById("unique").textContent = data.unique;
+        document.getElementById("fps").textContent = Number(data.fps).toFixed(1);
+        if (data.error) { setStatus(data.error, true); setState(false); stopPolling(); }
+        else if (!data.running) { setStatus("Video đã kết thúc."); setState(false); stopPolling(); }
+      } catch (_) {}
+    }
+    start.addEventListener("click", async () => {
+      if (!url.value.trim()) return setStatus("Hãy nhập đường dẫn hoặc URL video.", true);
+      setState(true); setStatus("Đang mở video và khởi tạo tracker...");
+      try {
+        const response = await fetch("/api/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: url.value.trim() }) });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Không thể bắt đầu");
+        placeholder.style.display = "none"; stream.style.display = "block";
+        stream.src = `/video?t=${Date.now()}`; setStatus("Đang tracking...");
+        stopPolling(); timer = setInterval(poll, 500);
+      } catch (error) { setStatus(error.message, true); setState(false); }
+    });
+    stop.addEventListener("click", async () => {
+      await fetch("/api/stop", { method: "POST" }); stopPolling(); setState(false); setStatus("Đã dừng.");
+    });
+  </script>
+</body>
+</html>
