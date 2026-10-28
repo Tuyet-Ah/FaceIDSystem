@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Legacy Human Tracking</title>
+  <title>Human Tracking Quality</title>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; padding: 24px; min-height: 100vh; background: #0f1220; color: #e8eaf2; font-family: "Segoe UI", sans-serif; }
@@ -25,6 +25,9 @@
     .card { background: #191d33; border: 1px solid #2b3050; border-radius: 10px; padding: 15px 17px; }
     .label { color: #8b93b0; text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
     .value { color: #69db7c; font-size: 29px; font-weight: 750; margin-top: 4px; }
+    .bad { color: #ff6b6b; }
+    .neutral { color: #e8eaf2; }
+    .performance { margin-top: 8px; line-height: 1.6; overflow-wrap: anywhere; }
     .status { min-height: 20px; margin-top: 13px; color: #9299b4; font-size: 13px; }
     .status.error { color: #ff6b6b; }
     @media (max-width: 650px) { body { padding: 14px; } .bar { flex-wrap: wrap; } .bar input { flex-basis: 100%; } .stats { grid-template-columns: 1fr; } }
@@ -32,17 +35,18 @@
 </head>
 <body>
   <div class="wrap">
-    <div class="head"><div><h1>Human Tracking</h1><div class="tag">Bản cũ · YOLO + TrackTrack + ReID</div></div><a id="analysisLink" class="tag" target="_blank">Mở phân tích mới :8009</a></div>
+    <div class="head"><div><h1>Human Tracking</h1><div class="tag">NONE trắng: chưa xác nhận ID · ID xanh: rõ, chất lượng tốt · ID đỏ: chất lượng kém, giữ nguyên ID</div></div><a id="analysisLink" class="tag" target="_blank">Mở phân tích mới :8009</a></div>
     <div class="bar">
       <input id="url" placeholder="Đường dẫn video local hoặc URL..." />
       <button id="start">Bắt đầu</button>
       <button id="stop" class="stop" disabled>Dừng</button>
     </div>
-    <div class="stage"><div id="placeholder">Nhập video để xem tracking ID trực tiếp.</div><img id="video" alt="MJPEG tracking stream" /></div>
+    <div class="stage"><div id="placeholder">Nhập video để theo dõi ID và chất lượng người trong khung.</div><img id="video" alt="MJPEG tracking stream" /></div>
+    <div class="tag performance">ID chỉ hiện sau 3 frame tốt liên tiếp có embedding nhất quán; trước đó là NONE. ID đỏ khi crop kém, chồng lấn/nghi che khuất, sát biên hoặc embedding không hợp lệ/không khớp; không ghi gallery nhưng giữ ID đã xác nhận. Quality gate chỉ áp dụng gallery và hiển thị của app, không thay đổi bộ nhớ ReID nội bộ TrackTrack.</div>
     <div class="stats">
       <div class="card"><div class="label">Người trong khung</div><div id="current" class="value">0</div></div>
-      <div class="card"><div class="label">Tổng ID duy nhất</div><div id="unique" class="value">0</div></div>
-      <div class="card"><div class="label">Tốc độ xử lý</div><div id="fps" class="value">0.0</div></div>
+      <div class="card"><div class="label">Có ID đang thấy (xanh + đỏ)</div><div id="assigned" class="value">0</div><div class="label">ID xanh / ID đỏ / NONE</div><div class="value"><span id="good">0</span> / <span id="bad" class="bad">0</span> / <span id="none" class="neutral">0</span></div><div class="label">Tổng raw ID đã xác nhận trong phiên</div><div id="unique" class="value">0</div></div>
+      <div class="card"><div class="label">Tốc độ xử lý (FPS đo được)</div><div id="fps" class="value">0.0</div><div class="tag performance">Embedding provider: <span id="embedding_backend">Chưa khởi tạo</span><br />Detection/track (gồm ReID): <span id="detection_ms">0.0</span> ms<br />Encoder ReID (nằm trong số trên): <span id="embedding_ms">0.0</span> ms<br />Render/JPEG: <span id="render_ms">0.0</span> ms<br />Không cộng riêng thời gian encoder vào detection/track.</div></div>
     </div>
     <div id="status" class="status"></div>
   </div>
@@ -64,8 +68,13 @@
     async function poll() {
       try {
         const data = await (await fetch("/api/count")).json();
-        document.getElementById("current").textContent = data.current;
-        document.getElementById("unique").textContent = data.unique;
+        for (const field of ["current", "assigned", "good", "bad", "none", "unique"]) {
+          document.getElementById(field).textContent = data[field];
+        }
+        document.getElementById("embedding_backend").textContent = data.embedding_backend ?? "Chưa khởi tạo";
+        for (const field of ["detection_ms", "embedding_ms", "render_ms"]) {
+          document.getElementById(field).textContent = Number(data[field]).toFixed(1);
+        }
         document.getElementById("fps").textContent = Number(data.fps).toFixed(1);
         if (data.error) { setStatus(data.error, true); setState(false); stopPolling(); }
         else if (!data.running) { setStatus("Video đã kết thúc."); setState(false); stopPolling(); }
@@ -73,13 +82,13 @@
     }
     start.addEventListener("click", async () => {
       if (!url.value.trim()) return setStatus("Hãy nhập đường dẫn hoặc URL video.", true);
-      setState(true); setStatus("Đang mở video và khởi tạo tracker...");
+      setState(true); setStatus("Đang mở video và khởi tạo bộ kiểm tra chất lượng...");
       try {
         const response = await fetch("/api/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: url.value.trim() }) });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "Không thể bắt đầu");
         placeholder.style.display = "none"; stream.style.display = "block";
-        stream.src = `/video?t=${Date.now()}`; setStatus("Đang tracking...");
+        stream.src = `/video?t=${Date.now()}`; setStatus("Đang theo dõi raw ID TrackTrack và kiểm tra chất lượng...");
         stopPolling(); timer = setInterval(poll, 500);
       } catch (error) { setStatus(error.message, true); setState(false); }
     });
