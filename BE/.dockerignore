@@ -1,0 +1,14 @@
+**
+!Dockerfile
+!requirements-docker.txt
+!backend/
+!backend/server.py
+!backend/face_service.py
+!backend/model_registry.py
+!backend/AdaFace/
+!backend/AdaFace/net.py
+!backend/AdaFace/pretrained/
+!backend/AdaFace/pretrained/adaface_ir50_webface4m.ckpt
+!docker/
+!docker/wsgi.py
+!docker/export_ghostfacenet.py

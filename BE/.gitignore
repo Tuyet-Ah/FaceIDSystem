@@ -6,3 +6,25 @@ dataset/recognition_logs/
 .env
 node_modules/
 venv/
+benchmark-results.json
+benchmark-*.json
+backend/*.bak
+
+# Local/private runtime data and downloaded binaries (never publish).
+*.db
+*.db-*
+*.sqlite*
+*.pkl
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.h5
+*.whl
+*.bin
+.env.*
+!.env.example
+backend/models/
+backend/AdaFace/
+backend/Silent-Face-Anti-Spoofing/
+tests/font-preview.png

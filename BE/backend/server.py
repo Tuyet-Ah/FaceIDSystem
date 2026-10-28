@@ -8,12 +8,16 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from functools import lru_cache
 
 import cv2
-from flask import Flask, jsonify, request, send_from_directory
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from flask import Flask, g, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from face_service import FaceService, FaceValidationError
+from model_registry import MODEL_IDS, ModelRegistry
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -39,6 +43,7 @@ ATTENDANCE_AFTERNOON_START_HOUR = max(
     1, min(23, int(os.getenv("FACEID_AFTERNOON_START_HOUR", "12")))
 )
 CAMERA_WINDOW_TITLE = "AVTVN FaceID - Local Camera (Q to close)"
+SHOW_METRICS = os.getenv("FACEID_SHOW_METRICS", "1") == "1"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 60 * 1024 * 1024
@@ -51,7 +56,7 @@ CORS(
                 "http://localhost:8443,http://localhost:5173",
             ).split(",")
         }
-    },
+    },  
 )
 
 EMPLOYEE_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -62,6 +67,31 @@ face_service = FaceService(
     ambiguity_margin=float(os.getenv("FACEID_AMBIGUITY_MARGIN", "0.04")),
 )
 camera_thread = None
+web_models = ModelRegistry(DATASET_DIR, EMBEDDINGS_PATH, face_service.threshold, face_service.ambiguity_margin)
+
+
+@app.after_request
+def attach_model_metrics(response):
+    metrics = getattr(g, "model_metrics", None)
+    if metrics is not None and response.is_json:
+        body = response.get_json()
+        body["metrics"] = metrics
+        response.set_data(app.json.dumps(body))
+    return response
+
+
+@app.post("/api/models/<model_id>/prepare")
+def prepare_web_model(model_id):
+    try:
+        _, metrics = web_models.prepare(model_id)
+        return jsonify(metrics)
+    except ValueError as error:
+        return jsonify({"message": str(error)}), 400
+    except Exception:
+        app.logger.exception("Cannot prepare model %s", model_id)
+        return jsonify({"message": "Không tải được model. Kiểm tra log backend, checkpoint và kết nối tải model."}), 503
+
+
 camera_stop_event = threading.Event()
 camera_state_lock = threading.Lock()
 camera_state = {
@@ -401,14 +431,65 @@ def record_local_attendance(employee, result, image):
     return False
 
 
+def metrics_lines(result):
+    inspection = result["inspection"]
+    timing = inspection.get("timing", {})
+    second = result.get("secondBestSimilarity", 0.0)
+    return [
+        f"sim {result['similarity']:.3f}  2nd {second:.3f}  thr {result['threshold']:.2f}",
+        f"det {inspection.get('detectionScore', 0):.2f}  "
+        f"detect {timing.get('detectMs', 0):.0f}ms  embed {timing.get('embedMs', 0):.0f}ms",
+    ]
+
+
+@lru_cache(maxsize=8)
+def camera_unicode_font(size):
+    candidates = [
+        os.getenv("FACEID_CAMERA_FONT", ""),
+        str(Path(os.getenv("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for path in candidates:
+        if path and Path(path).is_file():
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default(size=size)
+
+
+def draw_camera_label(frame, text, position, color):
+    """Draw Unicode text on a small ROI; keep OpenCV's BGR frame intact."""
+    font = camera_unicode_font(21)
+    left, top, right, bottom = font.getbbox(text)
+    tile = Image.new("RGBA", (max(1, right-left+4), max(1, bottom-top+4)))
+    ImageDraw.Draw(tile).text((2-left, 2-top), text, font=font,
+                             fill=(*color[::-1], 255), stroke_width=1,
+                             stroke_fill=(0, 0, 0, 255))
+    x = max(0, min(position[0], frame.shape[1]-1))
+    y = max(0, min(position[1]-tile.height, frame.shape[0]-1))
+    width = min(tile.width, frame.shape[1]-x)
+    height = min(tile.height, frame.shape[0]-y)
+    tile = tile.crop((0, 0, width, height))
+    roi = Image.fromarray(cv2.cvtColor(frame[y:y+height, x:x+width], cv2.COLOR_BGR2RGB))
+    roi.paste(tile, (0, 0), tile)
+    frame[y:y+height, x:x+width] = cv2.cvtColor(np.asarray(roi), cv2.COLOR_RGB2BGR)
+
+
 def local_camera_worker():
     update_camera_state(state="STARTING", running=False, error=None)
+    model_id = os.getenv("FACEID_LOCAL_MODEL", "buffalo_l")
+    record_attendance = os.getenv("FACEID_LOCAL_RECORD", "1") == "1"
+    try:
+        active_service, _ = web_models.prepare(model_id)
+    except Exception as error:
+        update_camera_state(state="ERROR", running=False, error=str(error))
+        return
+    update_camera_state(model=model_id, recordAttendance=record_attendance)
     backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
     capture = cv2.VideoCapture(CAMERA_INDEX, backend)
     if not capture.isOpened() and backend != cv2.CAP_ANY:
         capture.release()
         capture = cv2.VideoCapture(CAMERA_INDEX)
     if not capture.isOpened():
+        capture.release()
         update_camera_state(
             state="ERROR",
             running=False,
@@ -423,6 +504,8 @@ def local_camera_worker():
     frame_number = 0
     overlays = []
     recognition_streaks = {}
+    fps = 0.0
+    last_tick = time.perf_counter()
     try:
         while not camera_stop_event.is_set():
             success, frame = capture.read()
@@ -432,14 +515,21 @@ def local_camera_worker():
             if CAMERA_MIRROR:
                 frame = cv2.flip(frame, 1)
             frame_number += 1
+            now_tick = time.perf_counter()
+            instant_fps = 1.0 / max(now_tick - last_tick, 1e-6)
+            fps = instant_fps if fps == 0.0 else fps * 0.9 + instant_fps * 0.1
+            last_tick = now_tick
             if frame_number % CAMERA_SCAN_EVERY_FRAMES == 0:
                 started_at = time.perf_counter()
                 try:
-                    results = face_service.recognize_frame(frame)
+                    with web_models.lock:
+                        active_service, _ = web_models.prepare(model_id)
+                        results = active_service.recognize_frame(frame)
                     current_overlays = []
                     seen_employee_ids = set()
                     for result in results:
                         bbox = result["inspection"]["bbox"]
+                        info = metrics_lines(result) if SHOW_METRICS else []
                         if result["matched"]:
                             row = get_employee_or_none(result["employeeId"])
                             if row is not None and row["face_status"] == "READY":
@@ -450,27 +540,28 @@ def local_camera_worker():
                                 if recognition_streaks[employee_id] < CAMERA_CONFIRM_SCANS:
                                     current_overlays.append({
                                         "bbox": bbox,
-                                        "label": f"{employee['name']} - VERIFYING",
+                                        "label": f"{employee['name']} - VERIFYING", "info": info,
                                         "color": (0, 200, 255),
                                     })
                                     continue
-                                already_checked_in = record_local_attendance(
-                                    employee, result, frame
-                                )
-                                suffix = "ALREADY CHECKED IN" if already_checked_in else "CHECKED IN"
+                                if record_attendance:
+                                    already_checked_in = record_local_attendance(employee, result, frame)
+                                    suffix = "ALREADY CHECKED IN" if already_checked_in else "CHECKED IN"
+                                else:
+                                    suffix = "MATCH (TEST ONLY)"
                                 current_overlays.append({
                                     "bbox": bbox,
-                                    "label": f"{employee['name']} - {suffix} ({result['similarity'] * 100:.1f}%)",
+                                    "label": f"{employee['name']} - {suffix} ({result['similarity'] * 100:.1f}%)", "info": info,
                                     "color": (0, 200, 0),
                                 })
                             else:
                                 current_overlays.append({
-                                    "bbox": bbox, "label": "UNKNOWN", "color": (0, 0, 255)
+                                    "bbox": bbox, "label": "UNKNOWN", "color": (0, 0, 255), "info": info
                                 })
                         else:
                             current_overlays.append({
                                 "bbox": bbox,
-                                "label": f"UNKNOWN ({result['similarity'] * 100:.1f}%)",
+                                "label": f"UNKNOWN ({result['similarity'] * 100:.1f}%)", "info": info,
                                 "color": (0, 0, 255),
                             })
                     recognition_streaks = {
@@ -497,27 +588,59 @@ def local_camera_worker():
                 y2 = max(0, min(y2, frame.shape[0] - 1))
                 color = overlay["color"]
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(
-                    frame, overlay["label"], (x1, max(30, y1 - 12)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2,
-                )
+                draw_camera_label(frame, overlay["label"], (x1, max(30, y1 - 12)), color)
+                for line_index, line in enumerate(overlay.get("info", [])):
+                    cv2.putText(
+                        frame, line,
+                        (x1, min(frame.shape[0] - 8, y2 + 20 + line_index * 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+                    )
 
             cv2.putText(
                 frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2,
             )
             cv2.putText(
-                frame, "Press Q or ESC to close camera", (12, 55),
+                frame, "1:buffalo_l 2:buffalo_s 3:AdaFace 4:Ghost | Q:close", (12, 55),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
             )
             cv2.putText(
                 frame, f"Faces: {len(overlays)}", (12, 82),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
             )
+            if SHOW_METRICS:
+                hud_lines = [
+                    f"Model: {model_id} | {'ATTENDANCE' if record_attendance else 'TEST ONLY'}",
+                    f"Inference: {camera_status_snapshot()['inferenceMs']} ms   FPS: {fps:.1f}",
+                ]
+                for hud_index, hud_line in enumerate(hud_lines):
+                    cv2.putText(
+                        frame, hud_line, (12, 108 + hud_index * 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+                    )
 
             if SHOW_CAMERA_WINDOW:
                 cv2.imshow(CAMERA_WINDOW_TITLE, frame)
                 key = cv2.waitKey(1) & 0xFF
+                if key in (ord("1"), ord("2"), ord("3"), ord("4")):
+                    requested = MODEL_IDS[key - ord("1")]
+                    if requested != model_id:
+                        update_camera_state(state="LOADING", error=None)
+                        cv2.putText(frame, f"Loading {requested}...", (12, 180),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        cv2.imshow(CAMERA_WINDOW_TITLE, frame)
+                        cv2.waitKey(1)
+                        try:
+                            candidate, _ = web_models.prepare(requested)
+                            active_service, model_id = candidate, requested
+                            overlays, recognition_streaks = [], {}
+                            update_camera_state(model=model_id, inferenceMs=None,
+                                                detectedFaces=0, lastRecognition=None, error=None)
+                        except Exception as error:
+                            print(f"Cannot switch to {requested}: {error}", flush=True)
+                            update_camera_state(error=str(error))
+                        finally:
+                            update_camera_state(state="RUNNING")
                 if key in (ord("q"), 27):
                     camera_stop_event.set()
                     break
@@ -587,6 +710,8 @@ def get_camera_status():
 
 @app.post("/api/camera/start")
 def start_camera():
+    if os.getenv("FACEID_ENABLE_LOCAL_CAMERA", "1") != "1":
+        return jsonify({"message": "Camera local bị tắt trong môi trường này. Hãy dùng chức năng gửi ảnh nhận diện."}), 409
     started = start_local_camera()
     return jsonify({"started": started, **camera_status_snapshot()}), 202 if started else 200
 
@@ -811,9 +936,18 @@ def recognize_face():
 
     timestamp = now_iso()
     device = request.form.get("device", "Browser Camera").strip() or "Browser Camera"
+    live = request.form.get("live") == "1"
+    selected_model = request.form.get("model")
     try:
-        result = face_service.recognize(image_bytes)
+        if selected_model:
+            result, validation_error, g.model_metrics = web_models.recognize(selected_model, image_bytes)
+            if validation_error:
+                raise FaceValidationError(validation_error)
+        else:
+            result = face_service.recognize(image_bytes)
     except FaceValidationError as error:
+        if live:
+            return jsonify({"matched": False, "status": "UNKNOWN", "message": str(error)}), 422
         with get_db_connection() as connection:
             cursor = connection.execute(
                 """
@@ -829,6 +963,11 @@ def recognize_face():
             "message": str(error),
             "logId": log_id,
         }), 422
+    except ValueError as error:
+        return jsonify({"message": str(error)}), 400
+    except Exception:
+        app.logger.exception("Recognition model failed")
+        return jsonify({"message": "Model chưa sẵn sàng. Kiểm tra log backend rồi thử lại."}), 503
 
     employee = None
     if result["matched"]:
@@ -840,6 +979,17 @@ def recognize_face():
 
     status = "SUCCESS" if result["matched"] else "UNKNOWN"
     reason = None if result["matched"] else "Không khớp với nhân viên đã đăng ký"
+    if request.form.get("compare") == "1":
+        return jsonify({
+            "matched": result["matched"], "status": status,
+            "similarity": result["similarity"], "threshold": result["threshold"],
+            "employee": employee, "message": "Nhận diện thành công (không ghi điểm danh)" if employee else reason,
+        })
+    if live and not result["matched"]:
+        return jsonify({
+            "matched": False, "status": "UNKNOWN", "message": reason,
+            "similarity": result["similarity"], "threshold": result["threshold"],
+        })
     existing_log = get_current_period_success_log(employee["id"]) if employee else None
     if existing_log is not None:
         return jsonify({
@@ -958,13 +1108,15 @@ init_database()
 
 if __name__ == "__main__":
     ensure_face_runtime()
-    start_local_camera()
+    if os.getenv("FACEID_ENABLE_LOCAL_CAMERA", "1") == "1":
+        start_local_camera()
     try:
         app.run(
             host=os.getenv("FACEID_HOST", "127.0.0.1"),
             port=int(os.getenv("FACEID_PORT", "5000")),
             debug=os.getenv("FLASK_DEBUG", "0") == "1",
             threaded=True,
+            use_reloader=False,
         )
     finally:
         stop_local_camera()
