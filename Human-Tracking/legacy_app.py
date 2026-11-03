@@ -620,7 +620,6 @@ class TrackingWorker(threading.Thread):
     # ----------------------------------------------------------------- render
     def _render(self, frame, tracker_ids, boxes, statuses, ghosts):
         annotated = frame.copy()
-        overlay = frame.copy()
         height, width = frame.shape[:2]
 
         # Box dùng để vẽ (đã làm mượt); box thô vẫn dùng cho phân loại ở trên
@@ -629,66 +628,41 @@ class TrackingWorker(threading.Thread):
             for track_id, box in zip(tracker_ids, boxes)
         ]
 
-        def face_geometry(box):
-            x1, y1, x2, y2 = box
-            w = max(1, x2 - x1)
-            h = max(1, y2 - y1)
-            cx = int(x1 + w / 2)
-            cy = int(y1 + h * 0.13)
-            rx = max(10, int(w * 0.26))
-            ry = max(14, int(h * 0.13))
-            return w, h, cx, cy, rx, ry
-
-        # Lớp 1: mask bán trong suốt ở khuôn mặt
-        for status, box in zip(statuses, draw_boxes):
-            _, _, cx, cy, rx, ry = face_geometry(box)
-            cv2.ellipse(overlay, (cx, cy), (rx, ry), 0, 0, 360, STATUS_COLORS[status], -1)
-        if draw_boxes:
-            cv2.addWeighted(overlay, 0.25, annotated, 0.75, 0, annotated)
-
-        # Lớp 2: vết đi (vẽ sau addWeighted để không bị mờ)
+        # Vết đi (trails)
         self._draw_trails(annotated)
 
-        # Lớp 3: khung "ma" của track vừa lost
+        # Khung "ma" của track vừa lost
         for display_id, (x1, y1, x2, y2) in ghosts:
             cv2.rectangle(annotated, (x1, y1), (x2, y2), GHOST_COLOR, 1)
             cv2.putText(annotated, f"ID: {display_id} ?", (x1, max(12, y1 - 4)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, GHOST_COLOR, 1, cv2.LINE_AA)
 
-        # Lớp 4: viền mặt, 4 góc HUD, badge ID
+        # Khung chữ nhật bao quanh người và nhãn ID
         for status, track_id, box in zip(statuses, tracker_ids, draw_boxes):
             x1, y1, x2, y2 = box
             color = STATUS_COLORS[status]
-            w, h, cx, cy, rx, ry = face_geometry(box)
 
-            cv2.ellipse(annotated, (cx, cy), (rx, ry), 0, 0, 360, color, 2)
+            # Vẽ khung chữ nhật chuẩn
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
 
-            corner = max(6, min(14, int(min(w, h) * 0.12)))
-            cv2.line(annotated, (x1, y1), (x1 + corner, y1), color, 1)
-            cv2.line(annotated, (x1, y1), (x1, y1 + corner), color, 1)
-            cv2.line(annotated, (x2, y1), (x2 - corner, y1), color, 1)
-            cv2.line(annotated, (x2, y1), (x2, y1 + corner), color, 1)
-            cv2.line(annotated, (x1, y2), (x1 + corner, y2), color, 1)
-            cv2.line(annotated, (x1, y2), (x1, y2 - corner), color, 1)
-            cv2.line(annotated, (x2, y2), (x2 - corner, y2), color, 1)
-            cv2.line(annotated, (x2, y2), (x2, y2 - corner), color, 1)
-
+            # Nhãn ID
             if track_id is None:
                 label = "NONE"
             elif status == "NONE":
-                label = f"ID: {self._display_id(track_id)}?"   # có track nhưng chưa xác nhận
+                label = f"ID: {self._display_id(track_id)}?"
             else:
                 label = f"ID: {self._display_id(track_id)}"
-            (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            badge_x1 = max(0, cx - text_w // 2 - 4)
-            badge_y1 = max(0, cy - ry - text_h - 8)
-            badge_x2 = min(width - 1, badge_x1 + text_w + 8)
-            badge_y2 = min(height - 1, badge_y1 + text_h + 6)
 
-            cv2.rectangle(annotated, (badge_x1, badge_y1), (badge_x2, badge_y2), (20, 20, 20), -1)
-            cv2.rectangle(annotated, (badge_x1, badge_y1), (badge_x2, badge_y2), color, 1)
-            cv2.putText(annotated, label, (badge_x1 + 4, badge_y2 - 3),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+            cv2.putText(
+                annotated,
+                label,
+                (x1, max(18, y1 - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
         return annotated
 
     def _draw_stats(self, frame) -> None:
