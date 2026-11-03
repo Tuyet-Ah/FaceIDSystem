@@ -1,7 +1,9 @@
 """Real-time YOLO + quality-gated tracking web application.
 
-This server is intentionally separate from the offline movement-analysis app.
-Run both when the tracking view and aggregate movement maps are both needed.
+Bản đã chỉnh:
+  - Bỏ hoàn toàn khung NONE (người/ID chưa xác nhận không còn bị vẽ).
+  - Đồng bộ thời gian thực: tự bỏ qua khung khi xử lý không kịp, video không còn chạy chậm.
+  - Giảm lag của khung (EMA nhẹ hơn), FP16 trên GPU, nén/giảm kích thước ảnh gửi đi.
 
 Biến môi trường:
     FORCE_CPU=1     ép chạy CPU (mặc định: tự dùng GPU nếu có)
@@ -17,6 +19,7 @@ import os
 if os.environ.get("FORCE_CPU", "0") == "1":
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
+import math
 import queue
 import re
 import shutil
@@ -46,21 +49,28 @@ DEFAULT_URL = str("https://youtu.be/KMJS66jBtVQ?si=zy9x5xuYesA33dG0")
 DEBUG = os.environ.get("TRACK_DEBUG", "0") == "1"
 
 # ---- Detector ----
-IMAGE_SIZE = 640          # 480 dễ bỏ sót người ở xa; hạ lại 480 nếu máy yếu
+IMAGE_SIZE = 640          # hạ 480 hoặc 416 nếu muốn nhanh hơn nữa
 DETECT_CONF = 0.2
 DETECT_IOU = 0.6
 PERSON_CLASS = 0
+USE_HALF = torch.cuda.is_available()   # FP16 trên GPU (T4 hỗ trợ tốt)
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".avi", ".mkv", ".mov", ".m4v", ".m3u8", ".ts")
 
-# ---- Cổng chất lượng (đã nới so với bản cũ) ----
+# ---- Phát video mượt ----
+REALTIME_SYNC = True      # bỏ qua khung khi xử lý chậm để video chạy đúng tốc độ thật
+MAX_SKIP_FRAMES = 3       # bỏ tối đa N khung mỗi lần (quá nhiều tracker dễ mất dấu)
+STREAM_MAX_WIDTH = 960    # thu nhỏ ảnh gửi qua tunnel (0 = giữ nguyên)
+JPEG_QUALITY = 70
+
+# ---- Cổng chất lượng ----
 MIN_BRIGHTNESS = 30.0
 MAX_BRIGHTNESS = 230.0
-MIN_PERSON_SHARPNESS = 10.0       # cũ: 20
+MIN_PERSON_SHARPNESS = 10.0
 MIN_PERSON_WIDTH = 32
 MIN_PERSON_HEIGHT = 64
-MIN_EMBEDDING_CONFIDENCE = 0.35   # cũ: 0.45
-MAX_PERSON_OVERLAP = 0.45         # cũ: 0.35
-MIN_VISIBLE_BOX_FRACTION = 0.75   # cũ: 0.90
+MIN_EMBEDDING_CONFIDENCE = 0.35
+MAX_PERSON_OVERLAP = 0.45
+MIN_VISIBLE_BOX_FRACTION = 0.75
 
 # ---- ReID / gallery ----
 EMBEDDING_DIMENSION = 512
@@ -72,13 +82,14 @@ EMBEDDING_MEMORY_FRAMES = 450
 EMBEDDING_INTERVAL_FRAMES = 5
 MIN_GALLERY_UPDATE_SIMILARITY = 0.85
 ID_CONFIRM_FRAMES = 3
-PENDING_MAX_MISS = 2              # cho phép lỡ tối đa 2 frame khi đang xác nhận ID
-STATUS_GRACE_FRAMES = 6           # giữ GOOD thêm vài frame khi chất lượng tụt tạm thời
-ALIAS_SIMILARITY = 0.80           # track mới giống ID cũ >= ngưỡng này thì kế thừa ID cũ
+PENDING_MAX_MISS = 2
+STATUS_GRACE_FRAMES = 6
+ALIAS_SIMILARITY = 0.80
 
 # ---- Hiển thị ----
-GHOST_FRAMES = 20                 # vẽ khung "ma" cho track vừa bị lost
-BOX_SMOOTH = 0.6                  # EMA cho box (0 = tắt)
+SHOW_GHOSTS = True                # khung "ma" cho track vừa lost (đặt False để tắt)
+GHOST_FRAMES = 15
+BOX_SMOOTH = 0.4                  # EMA cho box (0 = tắt). Càng nhỏ càng bám sát, ít trễ
 TRAIL_LENGTH = 40
 TRAIL_MAX_AGE = 30
 TRAIL_VISIBLE_AGE = 5
@@ -86,7 +97,6 @@ TRAIL_SMOOTH = 0.5
 SMOOTH_MAX_AGE = 30
 
 STATUS_COLORS = {
-    "NONE": (255, 255, 255),
     "GOOD": (0, 200, 0),
     "BAD": (0, 150, 255),
 }
@@ -300,12 +310,19 @@ class TrackingWorker(threading.Thread):
                     str(Path(torch.__file__).resolve().parent / "lib")
                 )
             # ORT 1.18 (CUDA 11.8/cuDNN 8) has no preload_dlls API.
-            # torch was imported above and its DLL directory is retained here.
             if hasattr(ort, "preload_dlls"):
                 ort.preload_dlls()
         capture = cv2.VideoCapture(self.source)
         if not capture.isOpened():
             raise RuntimeError(f"Cannot open video: {self.source}")
+
+        # ---- đồng bộ thời gian thực ----
+        video_fps = capture.get(cv2.CAP_PROP_FPS)
+        if not video_fps or not math.isfinite(video_fps) or video_fps < 1 or video_fps > 120:
+            video_fps = 25.0
+        frame_interval = 1.0 / video_fps
+        play_start = time.perf_counter()
+        frames_read = 0
 
         fps_started = time.perf_counter()
         fps_frames = 0
@@ -314,6 +331,7 @@ class TrackingWorker(threading.Thread):
                 ok, frame = capture.read()
                 if not ok or frame is None:
                     break
+                frames_read += 1
                 if self._embedding_recorder is not None:
                     self._embedding_recorder.clear()
                 detection_started = time.perf_counter()
@@ -325,6 +343,7 @@ class TrackingWorker(threading.Thread):
                     iou=DETECT_IOU,
                     imgsz=IMAGE_SIZE,
                     device=0 if torch.cuda.is_available() else "cpu",
+                    half=USE_HALF,
                     tracker=str(TRACKER_CONFIG),
                     verbose=False,
                 )
@@ -353,6 +372,7 @@ class TrackingWorker(threading.Thread):
                     int(track.idx) for track in tracker.tracked_stracks
                     if track.frame_id == tracker.frame_id and track.is_activated and track.idx >= 0
                 }
+                # Detection chưa có ID chỉ dùng để kiểm tra che khuất, KHÔNG được vẽ.
                 for index, (box, confidence) in enumerate(zip(detections["boxes"], detections["confidences"])):
                     if index not in published_indices:
                         tracker_ids.append(None)
@@ -361,8 +381,8 @@ class TrackingWorker(threading.Thread):
                 self.detection_ms = (time.perf_counter() - detection_started) * 1000
 
                 statuses = self._classify(frame, tracker_ids, boxes, fresh_features, confidences)
-                self._update_trails(tracker_ids, boxes)
-                ghosts = self._collect_ghosts(tracker, tracker_ids)
+                self._update_trails(tracker_ids, boxes, statuses)
+                ghosts = self._collect_ghosts(tracker, tracker_ids) if SHOW_GHOSTS else []
 
                 render_started = time.perf_counter()
                 annotated = self._render(frame, tracker_ids, boxes, statuses, ghosts)
@@ -372,10 +392,33 @@ class TrackingWorker(threading.Thread):
                     self.fps = fps_frames / elapsed
                     fps_started, fps_frames = time.perf_counter(), 0
                 self._draw_stats(annotated)
-                encoded, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if STREAM_MAX_WIDTH and annotated.shape[1] > STREAM_MAX_WIDTH:
+                    scale = STREAM_MAX_WIDTH / annotated.shape[1]
+                    annotated = cv2.resize(
+                        annotated, (STREAM_MAX_WIDTH, int(annotated.shape[0] * scale)),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                encoded, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
                 if encoded:
                     self._publish(buffer.tobytes())
                 self.render_ms = (time.perf_counter() - render_started) * 1000
+
+                # ---- giữ nhịp phát đúng tốc độ video ----
+                if REALTIME_SYNC:
+                    expected = (time.perf_counter() - play_start) / frame_interval
+                    lag = int(expected - frames_read)
+                    if lag > 0:
+                        skip = min(MAX_SKIP_FRAMES, lag)
+                        for _ in range(skip):
+                            if not capture.grab():
+                                break
+                            frames_read += 1
+                        if lag > MAX_SKIP_FRAMES:
+                            # Quá tải: dời mốc thời gian để khỏi đuổi mãi không kịp
+                            play_start += (lag - MAX_SKIP_FRAMES) * frame_interval
+                    elif lag < 0:
+                        # Xử lý nhanh hơn video: chờ để không chạy nhanh quá
+                        time.sleep(min(0.05, -lag * frame_interval))
         finally:
             capture.release()
 
@@ -511,10 +554,11 @@ class TrackingWorker(threading.Thread):
                     gallery.pop(1)  # Preserve the enrollment anchor against gradual drift.
                 sample["last_saved"] = self._frame_number
 
-        self.current_count = len(statuses)
         self.good_count = statuses.count("GOOD")
         self.bad_count = statuses.count("BAD")
         self.none_count = statuses.count("NONE")
+        # Chỉ đếm những người thực sự được hiển thị (không tính NONE)
+        self.current_count = self.good_count + self.bad_count
         return statuses
 
     # -------------------------------------------------------------- smoothing
@@ -534,9 +578,9 @@ class TrackingWorker(threading.Thread):
         return [int(round(v)) for v in cur]
 
     # ----------------------------------------------------------------- trails
-    def _update_trails(self, tracker_ids, boxes) -> None:
-        for track_id, box in zip(tracker_ids, boxes):
-            if track_id is None:
+    def _update_trails(self, tracker_ids, boxes, statuses) -> None:
+        for track_id, box, status in zip(tracker_ids, boxes, statuses):
+            if track_id is None or status == "NONE":
                 continue
             display_id = self._display_id(track_id)
             x1, y1, x2, y2 = box
@@ -612,7 +656,7 @@ class TrackingWorker(threading.Thread):
                 x1, y1, x2, y2 = (int(v) for v in track.xyxy)
                 if x2 > x1 and y2 > y1:
                     ghosts.append((display_id, [x1, y1, x2, y2]))
-        except Exception as exc:  # noqa: BLE001  (thuộc tính có thể khác tùy bản tracker)
+        except Exception as exc:  # noqa: BLE001
             if DEBUG:
                 print(f"[dbg] ghost collection failed: {exc}")
         return ghosts
@@ -620,13 +664,6 @@ class TrackingWorker(threading.Thread):
     # ----------------------------------------------------------------- render
     def _render(self, frame, tracker_ids, boxes, statuses, ghosts):
         annotated = frame.copy()
-        height, width = frame.shape[:2]
-
-        # Box dùng để vẽ (đã làm mượt); box thô vẫn dùng cho phân loại ở trên
-        draw_boxes = [
-            self._smooth(track_id, box) if track_id is not None else list(box)
-            for track_id, box in zip(tracker_ids, boxes)
-        ]
 
         # Vết đi (trails)
         self._draw_trails(annotated)
@@ -637,28 +674,19 @@ class TrackingWorker(threading.Thread):
             cv2.putText(annotated, f"ID: {display_id} ?", (x1, max(12, y1 - 4)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, GHOST_COLOR, 1, cv2.LINE_AA)
 
-        # Khung chữ nhật bao quanh người và nhãn ID
-        for status, track_id, box in zip(statuses, tracker_ids, draw_boxes):
-            x1, y1, x2, y2 = box
+        # Chỉ vẽ người đã có ID xác nhận (GOOD/BAD). Bỏ hẳn khung NONE.
+        for status, track_id, box in zip(statuses, tracker_ids, boxes):
+            if track_id is None or status == "NONE":
+                continue
+            x1, y1, x2, y2 = self._smooth(track_id, box)
             color = STATUS_COLORS[status]
-
-            # Vẽ khung chữ nhật chuẩn
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-
-            # Nhãn ID
-            if track_id is None:
-                label = "NONE"
-            elif status == "NONE":
-                label = f"ID: {self._display_id(track_id)}?"
-            else:
-                label = f"ID: {self._display_id(track_id)}"
-
             cv2.putText(
                 annotated,
-                label,
+                f"ID: {self._display_id(track_id)}",
                 (x1, max(18, y1 - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.65,
                 color,
                 2,
                 cv2.LINE_AA,
@@ -668,7 +696,7 @@ class TrackingWorker(threading.Thread):
     def _draw_stats(self, frame) -> None:
         labels = [
             f"People in frame: {self.current_count}",
-            f"ID green: {self.good_count} | ID red: {self.bad_count} | None: {self.none_count}",
+            f"ID green: {self.good_count} | ID orange: {self.bad_count}",
             f"Confirmed IDs: {len(self._confirmed_ids)}",
             f"FPS: {self.fps:.1f} | Track: {self.detection_ms:.0f} ms | ReID: {self.embedding_ms:.0f} ms",
         ]
