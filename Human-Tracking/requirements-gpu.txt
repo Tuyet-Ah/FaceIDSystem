@@ -1,0 +1,11 @@
+# Install torch/torchvision from the cu118 index first; see LOCAL.md.
+torch==2.3.1
+torchvision==0.18.1
+numpy==1.26.4
+opencv-python==4.11.0.86
+onnxruntime-gpu==1.18.1
+ultralytics==8.4.193
+fastapi==0.162.0
+uvicorn==0.54.0
+yt-dlp==2026.10.21
+lap==0.5.13

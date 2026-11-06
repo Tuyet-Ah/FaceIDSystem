@@ -1,0 +1,32 @@
+# Weights nặng (đưa vào Kaggle Dataset)
+weights/*.pt
+weights/*.pth
+weights/*.onnx
+
+# Video và dữ liệu có người thật
+data/
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# Kết quả chạy
+out/
+web_outputs/
+*.pkl
+
+# Log
+*.log
+
+# Môi trường và cache
+.venv/
+.venv-*/
+.gpu-wheels/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Bí mật
+.env
+*.token
+Add-Content .gitignore "`nmot17_one/`noutput_frames/"

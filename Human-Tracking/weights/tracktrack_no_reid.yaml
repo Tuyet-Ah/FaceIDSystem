@@ -1,0 +1,22 @@
+# TrackTrack configuration for quality-gated known/unknown classification.
+tracker_type: tracktrack
+track_high_thresh: 0.4
+track_low_thresh: 0.1
+new_track_thresh: 0.45
+track_buffer: 180
+match_thresh: 0.75
+lost_match_thr: 0.9
+
+# Associate only by geometry, confidence and motion. Appearance ReID is disabled.
+iou_weight: 0.35
+reid_weight: 0.0
+conf_weight: 0.1
+angle_weight: 0.05
+
+penalty_p: 0.2
+penalty_q: 0.4
+reduce_step: 0.05
+tai_thr: 0.55
+min_track_len: 3
+gmc_method: sparseOptFlow
+with_reid: false
