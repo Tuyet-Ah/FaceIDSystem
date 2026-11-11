@@ -1,0 +1,7 @@
+# Install into the existing BE/venv CPU environment.
+ultralytics==8.4.193
+fastapi==0.162.0
+uvicorn==0.54.0
+yt-dlp==2026.10.21
+lap==0.5.13
+onnxruntime>=1.23,<2

@@ -122,18 +122,25 @@ class Tracklet:
 # =====================================================================
 # Cache kết quả Pass 1 (để không phải chạy lại khi phiên Kaggle bị ngắt)
 # =====================================================================
-def save_pass1_cache(path: Path, tracklets: dict, total: int, video_fps: float) -> None:
+def save_pass1_cache(path: Path, tracklets: dict, total: int, video_fps: float, config: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "wb") as handle:
-        pickle.dump({"tracklets": tracklets, "total": total, "video_fps": video_fps}, handle)
+        pickle.dump({"tracklets": tracklets, "total": total, "video_fps": video_fps, "config": config}, handle)
     os.replace(tmp, path)
     print(f"[cache] đã lưu Pass 1: {path}")
 
 
-def load_pass1_cache(path: Path):
+def load_pass1_cache(path: Path, config: dict):
     with open(path, "rb") as handle:
         data = pickle.load(handle)
+    saved_config = data.get("config")
+    if (saved_config is not None and saved_config != config) or (
+        saved_config is None and (
+            la.TRACKER_CONFIG.name == "botsort.yaml" or la.REID_MODEL == "fastreid"
+        )
+    ):
+        raise ValueError(f"Cache Pass 1 không khớp cấu hình. Hãy dùng --cache với file khác: {path}")
     print(f"[cache] dùng lại Pass 1 từ {path} ({len(data['tracklets'])} tracklet, {data['total']} frame)")
     return data["tracklets"], data["total"], data["video_fps"]
 
@@ -162,7 +169,12 @@ def run_detection_pass(source: str, max_frames: int | None, imgsz: int | None = 
     # Đăng ký trước model.track để lấy cả detection chưa có ID (dùng kiểm tra che khuất).
     model.add_callback("on_predict_postprocess_end", capture_detections)
 
-    if la.REID_MODEL == "osnet":
+    recorder = None
+    if hasattr(la, "attach_reid_encoder"):
+        recorder = la.attach_reid_encoder(model, appearance_path, DEVICE)
+        print(f"[pass1] {la.REID_LABEL}: {la.embedding_backend(recorder)}")
+    elif la.REID_MODEL == "osnet":
+        # Compatibility with the standalone Kaggle companion module.
         from osnet_encoder import OSNetEncoder
         from ultralytics.trackers import register_tracker
 
@@ -195,7 +207,6 @@ def run_detection_pass(source: str, max_frames: int | None, imgsz: int | None = 
         total = min(total, max_frames)
 
     tracklets: dict[int, Tracklet] = {}
-    recorder = None
     frame_idx = 0
     started = time.perf_counter()
     try:
@@ -235,10 +246,12 @@ def run_detection_pass(source: str, max_frames: int | None, imgsz: int | None = 
 
             fresh_features = {}
             if recorder is not None:
-                fresh_features = {
-                    track.track_id: recorder.features.get(int(track.idx))
-                    for track in tracker.tracked_stracks if track.frame_id == tracker.frame_id
-                }
+                for track in tracker.tracked_stracks:
+                    if track.frame_id == tracker.frame_id:
+                        feat = getattr(track, "curr_feat", None)
+                        if feat is None:
+                            feat = recorder.features.get(int(track.idx))
+                        fresh_features[track.track_id] = feat
             if result.boxes is not None and result.boxes.id is not None:
                 boxes = result.boxes.xyxy.int().cpu().tolist()
                 confidences = result.boxes.conf.cpu().tolist()
@@ -654,10 +667,14 @@ def parse_args():
                         help="ngưỡng giống ngoại hình để nối hai đoạn xa nhau (mặc định theo legacy_app)")
     parser.add_argument("--max-gap", type=int, default=STITCH_MAX_GAP,
                         help="khoảng cách tối đa (frame) giữa hai đoạn được nối")
+    parser.add_argument("-t", "--tracker", choices=["bytetrack", "botsort", "tracktrack"], default=None,
+                        help="chọn nhanh tracker: bytetrack | botsort | tracktrack")
+    parser.add_argument("-r", "--reid", choices=["fastreid", "osnet", "yolo"], default=None,
+                        help="chọn nhanh model ReID: fastreid (SBS R50-IBN) | osnet (IBN x1.0) | yolo")
     parser.add_argument("--imgsz", type=int, default=None,
                         help="kích thước ảnh inference YOLO (mặc định theo legacy_app: 640; tăng 960/1280 để bắt người nhỏ ở xa)")
     parser.add_argument("--reid-weights", default=None,
-                        help="đường dẫn file checkpoint OSNet (mặc định ưu tiên osnet_ibn_x1_0)")
+                        help="đường dẫn file trọng số thay thế cho model ReID đang chọn")
     parser.add_argument("--conf", type=float, default=None,
                         help="ngưỡng confidence phát hiện (mặc định theo legacy_app: 0.2)")
     parser.add_argument("--cache", type=Path, default=None,
@@ -668,13 +685,16 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
+    if args.tracker or args.reid:
+        la.configure_tracker_and_reid(tracker=args.tracker, reid=args.reid)
     if DEVICE == "cpu":
-        print("[offline] device: CPU (YOLO + OSNet, FP32)")
+        print("[offline] device: CPU (FP32)")
     else:
         print(f"[offline] device: {DEVICE} ({torch.cuda.get_device_name(0)}) | YOLO FP16={USE_HALF}")
     if not FORCE_CPU and DEVICE == "cpu":
         print("[offline] CẢNH BÁO: không thấy GPU. Trên Kaggle hãy bật Settings > Accelerator > GPU.")
     print(f"[offline] pipeline: {la.__name__}")
+    print(f"[offline] tracker: {la.TRACKER_CONFIG.stem}")
     print(f"[offline] ReID: {la.REID_LABEL}")
 
     source = la.resolve_source(args.input)
@@ -699,16 +719,21 @@ def main() -> None:
     cache_path = None
     if args.cache is not None:
         cache_path = args.cache if args.cache.is_absolute() else Path.cwd() / args.cache
+    cache_config = {
+        "tracker": la.TRACKER_CONFIG.name,
+        "reid_model": la.REID_MODEL,
+        "reid_weights": str(args.reid_weights or la.APPEARANCE_MODEL_PATH.name),
+    }
 
     started = time.perf_counter()
     from_cache = cache_path is not None and cache_path.is_file()
     if from_cache:
-        tracklets, total, video_fps = load_pass1_cache(cache_path)
+        tracklets, total, video_fps = load_pass1_cache(cache_path, cache_config)
     else:
         tracklets, total, video_fps = run_detection_pass(
             source, args.max_frames, args.imgsz, args.conf, args.reid_weights)
         if cache_path is not None:
-            save_pass1_cache(cache_path, tracklets, total, video_fps)
+            save_pass1_cache(cache_path, tracklets, total, video_fps, cache_config)
     pass1_seconds = time.perf_counter() - started
 
     tracks = build_tracks(tracklets, not args.no_stitch, args.stitch_sim, args.max_gap)

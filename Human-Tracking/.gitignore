@@ -29,4 +29,10 @@ __pycache__/
 # Bí mật
 .env
 *.token
-Add-Content .gitignore "`nmot17_one/`noutput_frames/"
+# Data / frames
+mot17_one/
+output_frames/
+
+# Scratch scripts
+hello.py
+test.py

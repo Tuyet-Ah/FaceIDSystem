@@ -62,28 +62,56 @@ USE_HALF = DEVICE != "cpu"  # FP16 chỉ bật khi có GPU
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "weights" / "yolo26s.pt"
 REID_MODEL = os.environ.get("REID_MODEL", "osnet").lower()
-if REID_MODEL not in {"osnet", "yolo"}:
-    raise ValueError("REID_MODEL must be osnet or yolo")
 OSNET_VARIANT = os.environ.get("OSNET_MODEL", "ibn").lower()
-if (BASE_DIR / "weights" / "osnet_ibn_x1_0_msmt17.pth").is_file() and OSNET_VARIANT == "ibn":
-    DEFAULT_OSNET_NAME = "osnet_ibn_x1_0_msmt17.pth"
-    REID_LABEL = "OSNet IBN x1.0 MSMT17 (Strongest)"
-elif (BASE_DIR / "weights" / "osnet_x1_0_msmt17.pth").is_file() and OSNET_VARIANT in {"x1_0", "ibn"}:
-    DEFAULT_OSNET_NAME = "osnet_x1_0_msmt17.pth"
-    REID_LABEL = "OSNet x1.0 MSMT17"
-else:
-    DEFAULT_OSNET_NAME = "osnet_x0_25_msmt17.pth"
-    REID_LABEL = "OSNet x0.25 MSMT17"
-
-APPEARANCE_MODEL_PATH = BASE_DIR / "weights" / (
-    DEFAULT_OSNET_NAME if REID_MODEL == "osnet" else "yolo26s-reid.onnx"
-)
 TRACKER_TYPE = os.environ.get("TRACKER_TYPE", "bytetrack").lower()
-TRACKER_CONFIG = BASE_DIR / "weights" / (
-    "bytetrack.yaml" if TRACKER_TYPE == "bytetrack" else (
-        "tracktrack_osnet.yaml" if REID_MODEL == "osnet" else "tracktrack_persist.yaml"
-    )
-)
+TRACKER_CONFIGS = {
+    "bytetrack": "bytetrack.yaml",
+    "tracktrack": "tracktrack_osnet.yaml",
+    "botsort": "botsort.yaml",
+}
+TRACKER_CONFIG = BASE_DIR / "weights" / TRACKER_CONFIGS.get(TRACKER_TYPE, "bytetrack.yaml")
+REID_LABEL = "OSNet"
+APPEARANCE_MODEL_PATH = BASE_DIR / "weights" / "osnet_ibn_x1_0_msmt17.pth"
+EMBEDDING_DIMENSION = 512
+
+
+def configure_tracker_and_reid(tracker: str | None = None, reid: str | None = None, osnet_model: str | None = None):
+    global TRACKER_TYPE, TRACKER_CONFIG, REID_MODEL, REID_LABEL, APPEARANCE_MODEL_PATH, EMBEDDING_DIMENSION
+    if tracker is not None:
+        tracker = tracker.lower()
+        if tracker not in TRACKER_CONFIGS:
+            raise ValueError(f"Tracker '{tracker}' không hợp lệ. Chọn: {list(TRACKER_CONFIGS.keys())}")
+        TRACKER_TYPE = tracker
+        TRACKER_CONFIG = BASE_DIR / "weights" / TRACKER_CONFIGS[TRACKER_TYPE]
+    if reid is not None:
+        reid = reid.lower()
+        if reid not in {"osnet", "fastreid", "yolo"}:
+            raise ValueError(f"ReID '{reid}' không hợp lệ. Chọn: ['osnet', 'fastreid', 'yolo']")
+        REID_MODEL = reid
+
+    variant = (osnet_model or OSNET_VARIANT).lower()
+    if REID_MODEL == "fastreid":
+        APPEARANCE_MODEL_PATH = BASE_DIR / "weights" / "msmt_sbs_R50-ibn.pth"
+        REID_LABEL = "FastReID SBS R50-IBN MSMT17"
+        EMBEDDING_DIMENSION = 2048
+    elif REID_MODEL == "yolo":
+        APPEARANCE_MODEL_PATH = BASE_DIR / "weights" / "yolo26s-reid.onnx"
+        REID_LABEL = "YOLO26s ReID"
+        EMBEDDING_DIMENSION = 512
+    else:
+        EMBEDDING_DIMENSION = 512
+        if (BASE_DIR / "weights" / "osnet_ibn_x1_0_msmt17.pth").is_file() and variant in {"ibn", "osnet_ibn_x1_0"}:
+            APPEARANCE_MODEL_PATH = BASE_DIR / "weights" / "osnet_ibn_x1_0_msmt17.pth"
+            REID_LABEL = "OSNet IBN x1.0 MSMT17 (Strongest)"
+        elif (BASE_DIR / "weights" / "osnet_x1_0_msmt17.pth").is_file() and variant in {"x1_0", "osnet_x1_0"}:
+            APPEARANCE_MODEL_PATH = BASE_DIR / "weights" / "osnet_x1_0_msmt17.pth"
+            REID_LABEL = "OSNet x1.0 MSMT17"
+        else:
+            APPEARANCE_MODEL_PATH = BASE_DIR / "weights" / "osnet_x0_25_msmt17.pth"
+            REID_LABEL = "OSNet x0.25 MSMT17"
+
+
+configure_tracker_and_reid()
 DEFAULT_URL = str("https://youtu.be/KMJS66jBtVQ?si=zy9x5xuYesA33dG0")
 DEBUG = os.environ.get("TRACK_DEBUG", "0") == "1"
 
@@ -111,7 +139,7 @@ MAX_PERSON_OVERLAP = 0.45
 MIN_VISIBLE_BOX_FRACTION = 0.75
 
 # ---- ReID / gallery ----
-EMBEDDING_DIMENSION = 512
+EMBEDDING_DIMENSION = 2048 if REID_MODEL == "fastreid" else 512
 MIN_EMBEDDING_NORM = 1e-6
 MIN_EMBEDDING_SIMILARITY = 0.75
 MAX_REDUNDANT_SIMILARITY = 0.95
@@ -301,17 +329,59 @@ class EmbeddingRecorder:
         started = time.perf_counter()
         features = self.encoder(image, detections)
         self.elapsed_ms += (time.perf_counter() - started) * 1000
-        # TrackTrack passes xywh + original detection index as the last column.
+        # Ultralytics passes the original detection index as the last column.
         self.features = {
             int(box[-1]): None if feature is None else np.asarray(feature).copy()
             for box, feature in zip(detections, features)
         }
         return features
 
+
+def attach_reid_encoder(model, checkpoint: Path, device) -> EmbeddingRecorder:
+    """Use the selected encoder in the tracker and in the app's ID gallery."""
+    from ultralytics.trackers import register_tracker
+
+    if REID_MODEL == "osnet":
+        from osnet_encoder import OSNetEncoder
+
+        encoder = OSNetEncoder(checkpoint, device=device)
+    elif REID_MODEL == "fastreid":
+        from fastreid_encoder import FastReIDEncoder
+
+        encoder = FastReIDEncoder(checkpoint, device=device)
+    else:
+        from ultralytics.trackers.utils.reid import ReID
+
+        encoder = ReID(str(checkpoint), device=device)
+
+    recorder = EmbeddingRecorder(encoder)
+    register_tracker(model, persist=True)
+
+    def install_encoder(predictor):
+        tracker = predictor.trackers[0]
+        if hasattr(tracker, "encoder"):
+            tracker.encoder = recorder
+        if TRACKER_TYPE == "botsort":
+            # Skip the built-in loader in YAML, then enable association with our encoder.
+            tracker.args.with_reid = True
+            tracker.args.model = str(checkpoint)
+
+    model.add_callback("on_predict_start", install_encoder)
+    return recorder
+
+
+def embedding_backend(recorder: EmbeddingRecorder) -> str:
+    encoder = recorder.encoder
+    if hasattr(encoder, "backend"):
+        return encoder.backend
+    session = getattr(getattr(encoder, "model", None), "session", None)
+    return session.get_providers()[0] if session is not None else "PyTorch"
+
+
 class PersonGallery:
     """Bounded, session-only memory keyed by stable display/person IDs.
 
-    Each person stores a few normalized 512-D vectors; frames/images are NOT saved.
+    Each person stores a few normalized vectors from the selected encoder.
     TTL and LRU cap prevent an endless camera feed from growing unbounded.
     """
 
@@ -467,20 +537,9 @@ class TrackingWorker(threading.Thread):
             detections["confidences"] = boxes.conf.cpu().tolist() if boxes is not None else []
         # Register before model.track adds its callback, which hides unconfirmed detections.
         model.add_callback("on_predict_postprocess_end", capture_detections)
-        if REID_MODEL == "osnet":
-            from osnet_encoder import OSNetEncoder
-            from ultralytics.trackers import register_tracker
-            register_tracker(model, persist=True)
-            def install_osnet(predictor):
-                if self._embedding_recorder is not None:
-                    return
-                encoder = OSNetEncoder(APPEARANCE_MODEL_PATH, device=torch.device(DEVICE))
-                self._embedding_recorder = EmbeddingRecorder(encoder)
-                if hasattr(predictor.trackers[0], "encoder"):
-                    predictor.trackers[0].encoder = self._embedding_recorder
-                self.embedding_backend = encoder.backend
-                print(f"[legacy tracker] {REID_LABEL} with {TRACKER_TYPE.upper()}: {self.embedding_backend}")
-            model.add_callback("on_predict_start", install_osnet)
+        self._embedding_recorder = attach_reid_encoder(model, APPEARANCE_MODEL_PATH, DEVICE)
+        self.embedding_backend = embedding_backend(self._embedding_recorder)
+        print(f"[legacy tracker] {REID_LABEL} with {TRACKER_TYPE.upper()}: {self.embedding_backend}")
         self.stage = "opening_video"
         capture = cv2.VideoCapture(self.source)
         if not capture.isOpened():
@@ -503,8 +562,7 @@ class TrackingWorker(threading.Thread):
                         raise RuntimeError(f"Mở được video nhưng không đọc được frame đầu tiên: {self.source}")
                     break
                 frames_read += 1
-                if self._embedding_recorder is not None:
-                    self._embedding_recorder.clear()
+                self._embedding_recorder.clear()
                 detection_started = time.perf_counter()
                 results = model.track(
                     source=frame,
@@ -521,25 +579,16 @@ class TrackingWorker(threading.Thread):
                 self.frames_processed += 1
                 result = results[0]
                 tracker = model.predictor.trackers[0]
-                if self._embedding_recorder is not None:
-                    if not self._embedding_recorder.features:
-                        self._embedding_recorder.extract_from_boxes(frame, detections.get("boxes", []))
-                elif getattr(tracker, "encoder", None) is not None:
-                    self._embedding_recorder = EmbeddingRecorder(tracker.encoder)
-                    tracker.encoder = self._embedding_recorder
-                    session = getattr(getattr(self._embedding_recorder.encoder, "model", None), "session", None)
-                    self.embedding_backend = session.get_providers()[0] if session is not None else "PyTorch"
-                    print(f"[legacy tracker] {REID_LABEL}: {self.embedding_backend}")
-
+                if not self._embedding_recorder.features:
+                    self._embedding_recorder.extract_from_boxes(frame, detections.get("boxes", []))
                 fresh_features = {}
-                if self._embedding_recorder is not None:
-                    fresh_features = {
-                        track.track_id: self._embedding_recorder.features.get(int(track.idx))
-                        for track in tracker.tracked_stracks if track.frame_id == tracker.frame_id
-                    }
-                    self.embedding_ms = self._embedding_recorder.elapsed_ms
-                else:
-                    self.embedding_ms = 0.0
+                for track in tracker.tracked_stracks:
+                    if track.frame_id == tracker.frame_id:
+                        feat = getattr(track, "curr_feat", None)
+                        if feat is None:
+                            feat = self._embedding_recorder.features.get(int(track.idx))
+                        fresh_features[track.track_id] = feat
+                self.embedding_ms = self._embedding_recorder.elapsed_ms
                 if result.boxes is not None and result.boxes.id is not None:
                     boxes = result.boxes.xyxy.int().cpu().tolist()
                     confidences = result.boxes.conf.cpu().tolist()
@@ -1019,6 +1068,7 @@ def count() -> dict:
             "gallery_ttl_seconds": GALLERY_TTL_SECONDS,
             "embedding_backend": None,
             "reid_model": REID_LABEL,
+            "tracker_type": TRACKER_TYPE,
             "device": DEVICE,
             "detection_ms": 0.0,
             "embedding_ms": 0.0,
@@ -1042,6 +1092,7 @@ def count() -> dict:
         "gallery_ttl_seconds": GALLERY_TTL_SECONDS,
         "embedding_backend": worker.embedding_backend,
         "reid_model": REID_LABEL,
+        "tracker_type": TRACKER_TYPE,
         "device": DEVICE,
         "detection_ms": round(worker.detection_ms, 1),
         "embedding_ms": round(worker.embedding_ms, 1),
