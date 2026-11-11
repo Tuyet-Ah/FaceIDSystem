@@ -1,0 +1,6 @@
+# Paths are relative to this YAML file, resolved by train.py.
+path: .
+train: images/train
+val: images/val
+names:
+  0: pc_case

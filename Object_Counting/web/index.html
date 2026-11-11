@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Đếm Case Máy Tính - PC Case Counter</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="2" width="16" height="20" rx="2"></rect>
+            <circle cx="12" cy="14" r="3"></circle>
+            <line x1="8" y1="6" x2="16" y2="6"></line>
+            <line x1="12" y1="18" x2="12" y2="18.01"></line>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>Đếm Thùng Máy PC (PC Case Counter)</h1>
+          <p class="brand-subtitle">Nhận diện &amp; đếm số lượng case máy tính bằng mô hình YOLO</p>
+        </div>
+      </div>
+      <div class="header-status">
+        <div id="status-pill" class="status-pill status-loading">
+          <span class="status-dot"></span>
+          <span id="status-text">Đang kiểm tra kết nối...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Input Column -->
+      <section class="panel panel-input">
+        <div class="panel-header">
+          <h2>Đầu vào hình ảnh</h2>
+          <div class="source-tabs">
+            <button type="button" id="tab-upload" class="tab-btn active">Tải file</button>
+            <button type="button" id="tab-webcam" class="tab-btn">Camera</button>
+            <button type="button" id="tab-sample" class="tab-btn">Ảnh mẫu</button>
+          </div>
+        </div>
+
+        <!-- File Upload Area -->
+        <div id="upload-section" class="tab-content active">
+          <div id="drop-zone" class="drop-zone">
+            <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp">
+            <div class="drop-zone-content">
+              <div class="upload-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+              </div>
+              <p class="drop-title">Kéo &amp; thả ảnh vào đây</p>
+              <p class="drop-hint">hoặc <span class="drop-browse">chọn ảnh từ máy tính</span></p>
+              <p class="drop-formats" id="drop-formats-text">Hỗ trợ JPG, PNG, WEBP (Tối đa 64 MB)</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Camera Section -->
+        <div id="webcam-section" class="tab-content hidden">
+          <div class="webcam-box">
+            <video id="camera-feed" autoplay playsinline muted></video>
+            <div id="camera-overlay" class="camera-overlay hidden">
+              <p id="camera-error-text">Không thể truy cập camera</p>
+            </div>
+          </div>
+          <div class="camera-actions">
+            <button type="button" id="btn-snap-camera" class="btn btn-secondary">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19 4h-3.17L14.4 2H9.6L8.17 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"></path>
+              </svg>
+              <span>Chụp từ camera</span>
+            </button>
+            <button type="button" id="btn-toggle-camera" class="btn btn-ghost">Dừng camera</button>
+          </div>
+        </div>
+
+        <!-- Sample Section -->
+        <div id="sample-section" class="tab-content hidden">
+          <div class="sample-box">
+            <p class="sample-desc">Sử dụng ảnh mẫu máy tính để kiểm thử nhanh mô hình nhận diện:</p>
+            <div class="sample-card">
+              <img src="/static/sample.jpg" alt="Ảnh mẫu test case" class="sample-thumbnail">
+              <div class="sample-card-info">
+                <strong>Ảnh máy tính kiểm thử</strong>
+                <span class="sample-meta">JPEG • 640×640 px</span>
+                <button type="button" id="btn-load-sample" class="btn btn-sm btn-secondary">Dùng ảnh này</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Preview Info Box -->
+        <div id="preview-box" class="preview-box hidden">
+          <div class="preview-thumb-wrapper">
+            <img id="preview-image" alt="Xem trước ảnh đã chọn">
+          </div>
+          <div class="preview-meta">
+            <p id="preview-filename" class="preview-filename">image.jpg</p>
+            <p id="preview-filesize" class="preview-filesize">0 KB</p>
+          </div>
+          <button type="button" id="btn-remove-image" class="btn-icon" title="Hủy chọn ảnh">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Inference Parameters -->
+        <div class="config-section">
+          <div class="config-header">
+            <label for="confidence-range" class="config-label">Ngưỡng tin cậy (Confidence):</label>
+            <span id="confidence-val" class="config-badge">0.40 (40%)</span>
+          </div>
+          <input type="range" id="confidence-range" min="0.1" max="0.9" step="0.05" value="0.4">
+          <div class="range-labels">
+            <span>0.1 (Nhận diện rộng)</span>
+            <span>0.5 (Cân bằng)</span>
+            <span>0.9 (Rất chặt)</span>
+          </div>
+          <p class="config-help">Ngưỡng mặc định 0.40 phù hợp cho đa số góc quay case máy tính.</p>
+        </div>
+
+        <!-- Action Button -->
+        <div class="action-section">
+          <button type="button" id="btn-detect" class="btn btn-primary btn-block" disabled>
+            <span class="spinner hidden" id="detect-spinner"></span>
+            <span id="detect-btn-text">Nhận diện &amp; Đếm Case</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Results Column -->
+      <section class="panel panel-result">
+        <div class="panel-header">
+          <h2>Kết quả nhận diện</h2>
+          <div id="result-actions" class="result-actions hidden">
+            <div class="view-switch">
+              <button type="button" id="btn-view-annotated" class="switch-btn active">Ảnh nhận diện</button>
+              <button type="button" id="btn-view-original" class="switch-btn">Ảnh gốc</button>
+            </div>
+            <button type="button" id="btn-download" class="btn btn-sm btn-ghost" title="Tải ảnh kết quả về máy">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>Tải ảnh</span>
+            </button>
+            <button type="button" id="btn-fullscreen" class="btn btn-sm btn-ghost" title="Xem ảnh phóng to">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <polyline points="9 21 3 21 3 15"></polyline>
+                <line x1="21" y1="3" x2="14" y2="10"></line>
+                <line x1="3" y1="21" x2="10" y2="14"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Initial Placeholder State -->
+        <div id="empty-state" class="empty-state">
+          <div class="empty-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+              <line x1="8" y1="21" x2="16" y2="21"></line>
+              <line x1="12" y1="17" x2="12" y2="21"></line>
+            </svg>
+          </div>
+          <h3>Chưa có dữ liệu phân tích</h3>
+          <p>Tải ảnh case máy tính ở khung bên trái hoặc chụp từ camera, sau đó nhấn <strong>Nhận diện &amp; Đếm Case</strong> để xem kết quả.</p>
+        </div>
+
+        <!-- Live Results Container -->
+        <div id="result-content" class="result-content hidden">
+          <!-- Summary Cards -->
+          <div class="stats-grid">
+            <div class="stat-card stat-card-highlight">
+              <div class="stat-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="4" y="2" width="16" height="20" rx="2"></rect>
+                  <circle cx="12" cy="14" r="3"></circle>
+                </svg>
+              </div>
+              <div class="stat-info">
+                <span class="stat-label">Số lượng Case</span>
+                <span id="stat-count" class="stat-value">0</span>
+              </div>
+            </div>
+
+            <div class="stat-card">
+              <div class="stat-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <polyline points="12 6 12 12 16 14"></polyline>
+                </svg>
+              </div>
+              <div class="stat-info">
+                <span class="stat-label">Thời gian xử lý</span>
+                <span id="stat-time" class="stat-value">0 ms</span>
+              </div>
+            </div>
+
+            <div class="stat-card">
+              <div class="stat-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                  <polyline points="21 15 16 10 5 21"></polyline>
+                </svg>
+              </div>
+              <div class="stat-info">
+                <span class="stat-label">Kích thước</span>
+                <span id="stat-res" class="stat-value">0 × 0</span>
+              </div>
+            </div>
+
+            <div class="stat-card">
+              <div class="stat-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                  <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                </svg>
+              </div>
+              <div class="stat-info">
+                <span class="stat-label">Độ tin cậy TB</span>
+                <span id="stat-conf" class="stat-value">0%</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Image Display Container -->
+          <div class="result-image-box">
+            <img id="image-annotated" class="result-image" alt="Ảnh kết quả với bounding box">
+            <img id="image-original" class="result-image hidden" alt="Ảnh gốc ban đầu">
+          </div>
+
+          <!-- Bounding Boxes Table -->
+          <div class="table-container">
+            <h3 class="table-title">Chi tiết các đối tượng phát hiện (<span id="table-count">0</span>)</h3>
+            <div class="table-wrapper">
+              <table class="detections-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Đối tượng</th>
+                    <th>Độ tin cậy</th>
+                    <th>Tọa độ Bounding Box [x1, y1, x2, y2]</th>
+                  </tr>
+                </thead>
+                <tbody id="detections-tbody">
+                  <!-- Injected via JS -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Fullscreen Modal -->
+    <div id="modal-zoom" class="modal hidden">
+      <div class="modal-backdrop" id="modal-backdrop"></div>
+      <div class="modal-content">
+        <button type="button" id="btn-close-modal" class="modal-close">&times;</button>
+        <img id="modal-img" alt="Xem ảnh phóng to">
+      </div>
+    </div>
+
+    <!-- Notification Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+  </div>
+</body>
+</html>
