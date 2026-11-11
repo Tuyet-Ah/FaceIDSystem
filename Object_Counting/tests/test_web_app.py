@@ -65,7 +65,7 @@ class WebAppTests(unittest.TestCase):
     def test_health_reports_model_presence_without_loading_it(self):
         response = self.client.get("/api/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json, {"ready": True, "model": "YOLO11n", "max_upload_mb": MAX_UPLOAD_MB})
+        self.assertEqual(response.json, {"ready": True, "model": "YOLO11n", "max_upload_mb": MAX_UPLOAD_MB, "default_imgsz": 960})
         self.assertEqual(self.loads, [])
         self.weights.unlink()
         self.assertFalse(self.client.get("/api/health").json["ready"])

@@ -67,14 +67,14 @@ def decode_image(content):
         raise InvalidImage("Không đọc được ảnh. Hãy chọn file JPEG, PNG hoặc WEBP hợp lệ.") from None
 
 
-def _default_detector_factory(weights):
+def _default_detector_factory(weights, imgsz=960):
     import torch
 
     torch.set_num_threads(2)
-    return CaseDetector(str(weights), device="cpu")
+    return CaseDetector(str(weights), device="cpu", imgsz=imgsz)
 
 
-def create_app(detector_factory=None, weights=None):
+def create_app(detector_factory=None, weights=None, default_imgsz=960):
     """Create the service; an injected factory receives the weights Path once."""
     app = Flask(__name__, static_folder=str(ROOT / "web"), static_url_path="/static")
     app.request_class = MemoryUploadRequest
@@ -118,7 +118,7 @@ def create_app(detector_factory=None, weights=None):
 
     @app.get("/api/health")
     def health():
-        return jsonify(ready=weights_path.is_file(), model=MODEL_NAME, max_upload_mb=MAX_UPLOAD_MB)
+        return jsonify(ready=weights_path.is_file(), model=MODEL_NAME, max_upload_mb=MAX_UPLOAD_MB, default_imgsz=default_imgsz)
 
     @app.post("/api/detect")
     def detect():
@@ -139,6 +139,13 @@ def create_app(detector_factory=None, weights=None):
         if not math.isfinite(confidence) or not 0.1 <= confidence <= 0.9:
             return jsonify(error="Ngưỡng nhận diện phải từ 0.1 đến 0.9."), 400
 
+        try:
+            imgsz = int(request.form.get("imgsz", str(default_imgsz)))
+        except (TypeError, ValueError):
+            return jsonify(error="Độ phân giải xử lý (imgsz) phải là số nguyên."), 400
+        if not (32 <= imgsz <= 2048 and imgsz % 32 == 0):
+            return jsonify(error="Độ phân giải xử lý phải là bội số của 32 từ 32 đến 2048."), 400
+
         content = upload.read(MAX_UPLOAD_BYTES + 1)
         if len(content) > MAX_UPLOAD_BYTES:
             return upload_too_large(None)
@@ -154,6 +161,8 @@ def create_app(detector_factory=None, weights=None):
                 if detector is None:
                     detector = factory(weights_path)
                 detector.confidence = confidence
+                if hasattr(detector, "imgsz"):
+                    detector.imgsz = imgsz
                 started = time.perf_counter()
                 detections = detector.detect(frame)
                 inference_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -169,6 +178,7 @@ def create_app(detector_factory=None, weights=None):
                 height=int(frame.shape[0]),
                 inference_ms=inference_ms,
                 model=MODEL_NAME,
+                imgsz=imgsz,
             )
         except Exception:
             app.logger.exception("PC-case inference failed")
@@ -181,10 +191,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--weights", type=Path, default=ROOT / "models" / "best.pt")
+    parser.add_argument("--imgsz", type=int, default=960, help="Độ phân giải xử lý ảnh (bội số 32, mặc định 960)")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("Port must be between 1 and 65535.")
-    app = create_app(weights=args.weights)
+    if not (32 <= args.imgsz <= 2048 and args.imgsz % 32 == 0):
+        parser.error("imgsz must be a multiple of 32 between 32 and 2048.")
+    app = create_app(weights=args.weights, default_imgsz=args.imgsz)
     app.run(host="127.0.0.1", port=args.port, debug=False, use_reloader=False, threaded=True)
 
 

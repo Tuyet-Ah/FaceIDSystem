@@ -120,6 +120,18 @@
         <!-- Inference Parameters -->
         <div class="config-section">
           <div class="config-header">
+            <label for="imgsz-select" class="config-label">Độ phân giải xử lý (imgsz):</label>
+            <select id="imgsz-select" class="config-select">
+              <option value="640">640 px (Tiêu chuẩn / Nhanh)</option>
+              <option value="960" selected>960 px (Chi tiết / Kệ &amp; Góc khuất)</option>
+              <option value="1280">1280 px (Siêu nét / Dàn máy ở xa)</option>
+            </select>
+          </div>
+          <p class="config-help">imgsz 960 hoặc 1280 giúp phóng lớn và bắt trọn từng case nhỏ xếp san sát trên kệ.</p>
+        </div>
+
+        <div class="config-section">
+          <div class="config-header">
             <label for="confidence-range" class="config-label">Ngưỡng tin cậy (Confidence):</label>
             <span id="confidence-val" class="config-badge">0.40 (40%)</span>
           </div>
@@ -129,7 +141,7 @@
             <span>0.5 (Cân bằng)</span>
             <span>0.9 (Rất chặt)</span>
           </div>
-          <p class="config-help">Ngưỡng mặc định 0.40 phù hợp cho đa số góc quay case máy tính.</p>
+          <p class="config-help">Hạ ngưỡng (0.25 - 0.35) để bắt thêm các case bị che khuất một phần.</p>
         </div>
 
         <!-- Action Button -->

@@ -44,7 +44,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Sample
   const btnLoadSample = document.getElementById('btn-load-sample');
 
-  // Confidence
+  // Inference Parameters
+  const imgszSelect = document.getElementById('imgsz-select');
   const confidenceRange = document.getElementById('confidence-range');
   const confidenceVal = document.getElementById('confidence-val');
 
@@ -109,6 +110,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (dropFormatsText) {
           dropFormatsText.textContent = `Hỗ trợ JPG, PNG, WEBP (Tối đa ${maxUploadMb} MB)`;
         }
+      }
+
+      if (imgszSelect && data.default_imgsz) {
+        imgszSelect.value = String(data.default_imgsz);
       }
 
       if (data.ready) {
@@ -329,6 +334,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const formData = new FormData();
     formData.append('image', currentFile, currentFile.name || 'image.jpg');
     formData.append('confidence', confidenceRange.value);
+    if (imgszSelect) {
+      formData.append('imgsz', imgszSelect.value);
+    }
 
     try {
       const startTime = performance.now();
@@ -367,7 +375,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     statCount.textContent = data.count;
     statTime.textContent = `${data.inference_ms} ms`;
-    statRes.textContent = `${data.width} × ${data.height}`;
+    statRes.textContent = `${data.width} × ${data.height} (${data.imgsz || 960}p)`;
 
     let avgConf = 0;
     if (data.detections && data.detections.length > 0) {
