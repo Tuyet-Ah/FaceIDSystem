@@ -146,6 +146,9 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
         if not (32 <= imgsz <= 2048 and imgsz % 32 == 0):
             return jsonify(error="Độ phân giải xử lý phải là bội số của 32 từ 32 đến 2048."), 400
 
+        sliced = request.form.get("sliced", "false").lower() in ("true", "1", "yes")
+        enhance = request.form.get("enhance", "false").lower() in ("true", "1", "yes")
+
         content = upload.read(MAX_UPLOAD_BYTES + 1)
         if len(content) > MAX_UPLOAD_BYTES:
             return upload_too_large(None)
@@ -161,8 +164,9 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                 if detector is None:
                     detector = factory(weights_path)
                 detector.confidence = confidence
-                if hasattr(detector, "imgsz"):
-                    detector.imgsz = imgsz
+                detector.imgsz = imgsz
+                detector.sliced = sliced
+                detector.enhance_contrast = enhance
                 started = time.perf_counter()
                 detections = detector.detect(frame)
                 inference_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -179,6 +183,8 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                 inference_ms=inference_ms,
                 model=MODEL_NAME,
                 imgsz=imgsz,
+                sliced=sliced,
+                enhance=enhance,
             )
         except Exception:
             app.logger.exception("PC-case inference failed")

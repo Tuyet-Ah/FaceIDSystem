@@ -28,6 +28,9 @@ def make_image(format="JPEG", size=(100, 80), orientation=None):
 class FakeDetector:
     def __init__(self):
         self.confidence = None
+        self.imgsz = None
+        self.sliced = None
+        self.enhance_contrast = None
         self.frames = []
         self.confidences = []
 
@@ -209,6 +212,21 @@ class WebAppTests(unittest.TestCase):
         response = self.upload(headers={"Origin": "https://unrelated.example"})
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.loads, [])
+
+    def test_sliced_and_enhance_flags_are_accepted_and_returned(self):
+        fields = {
+            "image": (BytesIO(make_image()), "photo.jpg"),
+            "sliced": "true",
+            "enhance": "true",
+            "imgsz": "960",
+        }
+        response = self.client.post("/api/detect", data=fields, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json["sliced"])
+        self.assertTrue(response.json["enhance"])
+        self.assertEqual(response.json["imgsz"], 960)
+        self.assertTrue(getattr(self.detector, "sliced", False))
+        self.assertTrue(getattr(self.detector, "enhance_contrast", False))
 
 
 if __name__ == "__main__":

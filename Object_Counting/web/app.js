@@ -48,6 +48,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const imgszSelect = document.getElementById('imgsz-select');
   const confidenceRange = document.getElementById('confidence-range');
   const confidenceVal = document.getElementById('confidence-val');
+  const checkSliced = document.getElementById('check-sliced');
+  const checkEnhance = document.getElementById('check-enhance');
 
   // Detect Action
   const btnDetect = document.getElementById('btn-detect');
@@ -337,6 +339,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (imgszSelect) {
       formData.append('imgsz', imgszSelect.value);
     }
+    if (checkSliced) {
+      formData.append('sliced', checkSliced.checked ? 'true' : 'false');
+    }
+    if (checkEnhance) {
+      formData.append('enhance', checkEnhance.checked ? 'true' : 'false');
+    }
 
     try {
       const startTime = performance.now();
@@ -375,7 +383,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     statCount.textContent = data.count;
     statTime.textContent = `${data.inference_ms} ms`;
-    statRes.textContent = `${data.width} × ${data.height} (${data.imgsz || 960}p)`;
+    const sliceLabel = data.sliced ? ' + Zoom Slice' : '';
+    statRes.textContent = `${data.width} × ${data.height} (${data.imgsz || 960}p${sliceLabel})`;
 
     let avgConf = 0;
     if (data.detections && data.detections.length > 0) {

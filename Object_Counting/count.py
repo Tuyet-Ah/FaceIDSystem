@@ -23,6 +23,8 @@ def build_parser():
     parser.add_argument("--prompt", default="computer tower", help="English YOLOE prompt for --mode text.")
     parser.add_argument("--confidence", type=float, default=0.4)
     parser.add_argument("--imgsz", type=int, default=640)
+    parser.add_argument("--sliced", action="store_true", help="Enable high-resolution sliced inference (SAHI) for distant objects.")
+    parser.add_argument("--enhance", action="store_true", help="Apply CLAHE contrast enhancement for dark or distant areas.")
     parser.add_argument("--device", default="cpu", help="cpu or CUDA device index, e.g. 0.")
     parser.add_argument("--roi", help="Only count box centers in x1,y1,x2,y2 (image pixels).")
     parser.add_argument("--interval", type=float, default=1, help="Minimum seconds between predictions.")
@@ -65,7 +67,8 @@ def run(args):
     roi = parse_roi(args.roi)
     weights = args.weights or ("yoloe-11s-seg.pt" if args.mode == "text" else str(ROOT / "models/best.pt"))
     detector = CaseDetector(weights, args.mode, args.class_name, args.prompt,
-                            args.confidence, args.imgsz, args.device, roi)
+                            args.confidence, args.imgsz, args.device, roi,
+                            sliced=args.sliced, enhance_contrast=args.enhance)
     source = open_source(args.source, args.source_kind, args.timeout)
     failures = 0
     try:

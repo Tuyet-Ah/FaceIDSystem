@@ -144,6 +144,25 @@
           <p class="config-help">Hạ ngưỡng (0.25 - 0.35) để bắt thêm các case bị che khuất một phần.</p>
         </div>
 
+        <!-- Distance & Enhancement Options -->
+        <div class="config-section">
+          <div class="enhancement-title">Tùy chọn nâng cao cho vật thể ở xa &amp; kệ:</div>
+          <label class="toggle-control">
+            <input type="checkbox" id="check-sliced" checked>
+            <span class="toggle-label">
+              <strong>🔍 Quét chi tiết tầm xa (Zoom Slice / SAHI)</strong>
+              <small>Chia nhỏ ảnh để soi rõ case ở xa với độ phân giải gốc 100%.</small>
+            </span>
+          </label>
+          <label class="toggle-control">
+            <input type="checkbox" id="check-enhance">
+            <span class="toggle-label">
+              <strong>✨ Tăng tương phản &amp; làm rõ viền (CLAHE)</strong>
+              <small>Làm sắc nét các case trong bóng tối hoặc góc kệ bị mờ.</small>
+            </span>
+          </label>
+        </div>
+
         <!-- Action Button -->
         <div class="action-section">
           <button type="button" id="btn-detect" class="btn btn-primary btn-block" disabled>
