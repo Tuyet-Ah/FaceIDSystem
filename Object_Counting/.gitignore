@@ -11,8 +11,14 @@ __pycache__/
 runs/
 outputs/
 datasets/raw/
+datasets/video_frames/
 datasets/pc_case_desktop_v2/
-exports/*.zip
+*.mp4
+*.avi
+*.mov
+*.mkv
+exports/*
+!exports/colab_prepare_cell.py
 datasets/pc_case/images/**
 datasets/pc_case/labels/**
 !datasets/pc_case/images/**/

@@ -85,6 +85,38 @@ Mỗi dòng nhãn: `class x_center y_center width height`; tọa độ và kích
 
 Chia train/val theo **buổi chụp hoặc bố trí khác nhau**. Không đưa các khung hình gần giống nhau vào cả hai tập. Validator chặn ảnh trùng byte giữa train/val, nhưng bạn vẫn phải kiểm tra các ảnh gần trùng. Mỗi tập cần có case được gán nhãn.
 
+## Trích ảnh từ video kệ PC để gán nhãn
+
+Đặt video trong project hoặc truyền đường dẫn đầy đủ:
+
+```powershell
+.\.venv\Scripts\python.exe extract_frames.py "C:\data\ke_pc.mp4" --interval 2 --max-frames 300
+```
+
+Lệnh lấy ảnh cách quãng trên toàn clip. Nếu video dài hơn giới hạn ảnh, khoảng lấy mẫu tự tăng để vẫn phủ toàn video. Script không chạy YOLO, không tạo nhãn và không train.
+
+Mỗi lần chạy tạo một thư mục mới trong `datasets/video_frames/`:
+
+- `candidates/`: toàn bộ ảnh được lấy mẫu, giữ nguyên nội dung để có thể chọn lại.
+- `selected/`: các ảnh được chọn; trong nhóm ảnh liên tiếp gần như giống nhau, ưu tiên ảnh nét hơn.
+- `contact_sheet.jpg`: bảng ảnh nhỏ để xem nhanh và kiểm tra lựa chọn.
+- `manifest.json`: nguồn video, buổi quay, số frame, thời điểm lấy ảnh, điểm độ nét và lý do chọn.
+- `selected_frames.zip`: chỉ chứa ảnh JPEG đã chọn để đưa lên web gán nhãn.
+
+Lọc ảnh gần trùng chỉ là bước hỗ trợ. Kiểm tra lại bảng ảnh, đặc biệt các cảnh mờ, thiếu sáng, case nhỏ hoặc bị che khuất; các ảnh ứng viên vẫn được giữ để khôi phục lựa chọn nếu cần.
+
+Upload ảnh đã chọn vào project Object Detection trên Roboflow (hoặc web gán nhãn bạn đang dùng), vẽ khung quanh từng case với lớp duy nhất `pc_case`, rồi xuất YOLO Detection. Đây là ảnh gốc để gán nhãn, không có khung nhận diện của model cũ chèn lên ảnh.
+
+Giữ các ảnh từ cùng clip/buổi quay trong cùng một tập dữ liệu. Dùng một clip hoặc buổi quay khác để làm validation/test; không chia ngẫu nhiên các frame gần nhau vào cả train và val. Bổ sung các bố trí, điều kiện sáng, cảnh trống và cảnh có nhiều case để kiểm tra khả năng đếm.
+
+Sau khi gán nhãn và chuẩn bị dataset mới, có thể fine-tune từ model đã có:
+
+```powershell
+.\.venv\Scripts\python.exe train.py --data datasets/pc_case/data.yaml --model models/best.pt --epochs 50
+```
+
+Hoặc dùng `YOLO("best.pt").train(data="data.yaml", ...)` trên Colab như trước. Đây là lượt fine-tune mới trên dữ liệu bổ sung; giữ lại bộ ảnh cũ phù hợp để model vẫn gặp các kiểu case đã học.
+
 ## 5. Kiểm tra và fine-tune
 
 ```powershell
