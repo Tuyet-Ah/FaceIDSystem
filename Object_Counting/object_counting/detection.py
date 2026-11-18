@@ -108,12 +108,23 @@ class CaseDetector:
             self.class_names = {prompt}
         else:
             self.model = YOLO(weights, task="detect")
-            self.class_names = {class_name}
-            if class_name not in self.model.names.values():
-                raise ValueError(
-                    f"Model has no class '{class_name}'. Use weights trained on pc_case "
-                    "or choose the exact label with --class-name."
-                )
+            if class_name in self.model.names.values():
+                self.class_names = {class_name}
+            elif len(self.model.names) == 1:
+                self.class_names = set(self.model.names.values())
+            else:
+                matching = {
+                    name for name in self.model.names.values()
+                    if name.lower().replace("-", " ").replace("_", " ") in
+                    ("pc case", "computer case", "desktop pc", "case", "tower")
+                }
+                if matching:
+                    self.class_names = matching
+                else:
+                    raise ValueError(
+                        f"Model has no class '{class_name}'. Use weights trained on pc_case "
+                        "or choose the exact label with --class-name."
+                    )
         self.confidence, self.imgsz, self.device, self.roi = confidence, imgsz, device, roi
         self.sliced = sliced
         self.slice_size = slice_size

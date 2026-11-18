@@ -28,6 +28,19 @@ ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
 MODEL_NAME = "YOLO11n"
 
 
+def resolve_default_weights():
+    candidates = [
+        ROOT / "models" / "pc_v7_best.pt",
+        ROOT / "pc_v7_best.pt",
+        ROOT / "models" / "best.pt",
+        ROOT / "best.pt",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return ROOT / "models" / "pc_v7_best.pt"
+
+
 class MemoryUploadRequest(Request):
     """Keep bounded uploads in memory instead of Werkzeug's disk spool."""
 
@@ -85,7 +98,8 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
         TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"],
     )
     app.json.ensure_ascii = False
-    weights_path = Path(weights) if weights is not None else ROOT / "models" / "best.pt"
+    weights_path = Path(weights) if weights is not None else resolve_default_weights()
+    model_display_name = f"pc_v7 ({MODEL_NAME})" if "pc_v7" in weights_path.stem else MODEL_NAME
     factory = detector_factory or _default_detector_factory
     inference_lock = threading.Lock()
     detector = None
@@ -118,7 +132,7 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
 
     @app.get("/api/health")
     def health():
-        return jsonify(ready=weights_path.is_file(), model=MODEL_NAME, max_upload_mb=MAX_UPLOAD_MB, default_imgsz=default_imgsz)
+        return jsonify(ready=weights_path.is_file(), model=model_display_name, max_upload_mb=MAX_UPLOAD_MB, default_imgsz=default_imgsz)
 
     @app.post("/api/detect")
     def detect():
@@ -158,7 +172,7 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
             return jsonify(error=str(exc)), exc.status
 
         if not weights_path.is_file():
-            return jsonify(error="Chưa tìm thấy mô hình. Vui lòng đặt best.pt trong thư mục models."), 503
+            return jsonify(error=f"Chưa tìm thấy mô hình. Vui lòng đặt {weights_path.name} trong thư mục models."), 503
         try:
             with inference_lock:
                 if detector is None:
@@ -196,7 +210,7 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--weights", type=Path, default=ROOT / "models" / "best.pt")
+    parser.add_argument("--weights", type=Path, default=resolve_default_weights())
     parser.add_argument("--imgsz", type=int, default=960, help="Độ phân giải xử lý ảnh (bội số 32, mặc định 960)")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:

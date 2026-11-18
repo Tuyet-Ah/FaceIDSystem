@@ -6,6 +6,7 @@ __pycache__/
 .cache/
 *.pt
 !models/best.pt
+!models/pc_v7_best.pt
 *.onnx
 *.torchscript
 *.ts

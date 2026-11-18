@@ -6,7 +6,7 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 echo Open http://127.0.0.1:8000 in your browser.
-echo Running with high-resolution imgsz 960 for detailed detection.
+echo Using model pc_v7 with high-resolution imgsz 960.
 echo Press Ctrl+C in this window to stop the web app.
-".venv\Scripts\python.exe" web_app.py --imgsz 960
+".venv\Scripts\python.exe" web_app.py --weights models/pc_v7_best.pt --imgsz 960
 pause
