@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-11-18T09:01:30.398275+00:00",
+  "source": "sample_images\\DesktoPC-105-_jpg.rf.ca17add88a485271ce5dd29fbaefab2b.jpg",
+  "prompt": "pc case",
+  "count": 1,
+  "inference_time_sec": 8.2239,
+  "detections": [
+    {
+      "xyxy": [
+        142.87,
+        8.47,
+        487.93,
+        504.6
+      ],
+      "confidence": 0.9118,
+      "class_name": "pc case"
+    }
+  ]
+}

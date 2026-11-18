@@ -4,6 +4,7 @@ import argparse
 import base64
 from dataclasses import asdict
 from io import BytesIO
+import json
 import math
 from pathlib import Path
 import threading
@@ -19,6 +20,9 @@ from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 from count import annotate
 from object_counting.cli import ROOT
 from object_counting.detection import CaseDetector
+from object_counting.loca_detector import LOCADetector
+from object_counting.grounding_dino.detector import GroundingDinoDetector
+from object_counting.grounding_dino.visualizer import annotate_image as dino_annotate_image
 
 
 MAX_UPLOAD_MB = 64
@@ -103,6 +107,11 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
     factory = detector_factory or _default_detector_factory
     inference_lock = threading.Lock()
     detector = None
+    loca_detector = None
+    dino_detector = None
+
+    loca_zero_path = ROOT / "models" / "loca_zero_shot.pth"
+    loca_few_path = ROOT / "models" / "loca_few_shot.pth"
 
     @app.after_request
     def response_headers(response):
@@ -132,11 +141,23 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
 
     @app.get("/api/health")
     def health():
-        return jsonify(ready=weights_path.is_file(), model=model_display_name, max_upload_mb=MAX_UPLOAD_MB, default_imgsz=default_imgsz)
+        yolo_ok = weights_path.is_file()
+        loca_ok = loca_zero_path.is_file() or loca_few_path.is_file()
+        return jsonify(
+            ready=yolo_ok or loca_ok,
+            yolo_ready=yolo_ok,
+            loca_ready=loca_ok,
+            loca_zero_ready=loca_zero_path.is_file(),
+            loca_few_ready=loca_few_path.is_file(),
+            dino_ready=True,
+            model=model_display_name,
+            max_upload_mb=MAX_UPLOAD_MB,
+            default_imgsz=default_imgsz,
+        )
 
     @app.post("/api/detect")
     def detect():
-        nonlocal detector
+        nonlocal detector, loca_detector, dino_detector
         origin = request.headers.get("Origin")
         if origin:
             parsed_origin = urlsplit(origin)
@@ -145,7 +166,150 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
 
         upload = request.files.get("image")
         if upload is None or not upload.filename:
-            return jsonify(error="Vui lòng chọn một ảnh để đếm case máy tính."), 400
+            return jsonify(error="Vui lòng chọn một ảnh để đếm đối tượng."), 400
+
+        model_type = request.form.get("model_type", "yolo11").strip().lower()
+        if model_type not in ("yolo11", "loca", "grounding_dino", "dino"):
+            model_type = "yolo11"
+
+        content = upload.read(MAX_UPLOAD_BYTES + 1)
+        if len(content) > MAX_UPLOAD_BYTES:
+            return upload_too_large(None)
+        try:
+            frame = decode_image(content)
+        except InvalidImage as exc:
+            return jsonify(error=str(exc)), exc.status
+
+        # -----------------------------
+        # 1. Xử lý Grounding DINO
+        # -----------------------------
+        if model_type in ("grounding_dino", "dino"):
+            prompt = request.form.get("prompt", "pc case. computer tower.").strip()
+            if not prompt:
+                prompt = "pc case. computer tower."
+            try:
+                box_threshold = float(request.form.get("box_threshold", "0.35"))
+            except (TypeError, ValueError):
+                box_threshold = 0.35
+            try:
+                text_threshold = float(request.form.get("text_threshold", "0.25"))
+            except (TypeError, ValueError):
+                text_threshold = 0.25
+            try:
+                nms_threshold = float(request.form.get("nms_threshold", "0.50"))
+            except (TypeError, ValueError):
+                nms_threshold = 0.50
+
+            try:
+                with inference_lock:
+                    if dino_detector is None:
+                        dino_detector = GroundingDinoDetector(model_id="IDEA-Research/grounding-dino-tiny", device="cpu")
+                    started = time.perf_counter()
+                    dino_detections = dino_detector.detect(
+                        frame,
+                        prompt=prompt,
+                        box_threshold=box_threshold,
+                        text_threshold=text_threshold,
+                        nms_threshold=nms_threshold,
+                    )
+                    inference_ms = round((time.perf_counter() - started) * 1000, 1)
+
+                annotated = dino_annotate_image(
+                    frame,
+                    dino_detections,
+                    title_prefix=f"Grounding DINO: {prompt}",
+                )
+
+                image_buffer = BytesIO()
+                Image.fromarray(annotated[:, :, ::-1]).save(image_buffer, format="JPEG", quality=90)
+                encoded = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+
+                return jsonify(
+                    count=len(dino_detections),
+                    detections=[d.to_dict() for d in dino_detections],
+                    image="data:image/jpeg;base64," + encoded,
+                    width=int(frame.shape[1]),
+                    height=int(frame.shape[0]),
+                    inference_ms=inference_ms,
+                    model=f"Grounding DINO ({prompt})",
+                    model_type="grounding_dino",
+                    prompt=prompt,
+                )
+            except Exception:
+                app.logger.exception("Grounding DINO inference failed")
+                return jsonify(error="Không thể xử lý ảnh bằng mô hình Grounding DINO. Vui lòng thử lại."), 503
+
+        # -----------------------------
+        # 1. Xử lý mô hình LOCA
+        # -----------------------------
+        if model_type == "loca":
+            loca_mode = request.form.get("loca_mode", "zero_shot").strip().lower()
+            is_zero_shot = (loca_mode != "few_shot")
+            try:
+                threshold_rel = float(request.form.get("threshold_rel", "0.12"))
+            except (TypeError, ValueError):
+                threshold_rel = 0.12
+            threshold_rel = max(0.01, min(0.6, threshold_rel))
+
+            exemplar_boxes = []
+            if not is_zero_shot:
+                exemplar_raw = request.form.get("exemplars", "[]")
+                try:
+                    parsed_boxes = json.loads(exemplar_raw)
+                    if isinstance(parsed_boxes, list):
+                        for b in parsed_boxes:
+                            if isinstance(b, (list, tuple)) and len(b) == 4:
+                                exemplar_boxes.append([float(v) for v in b])
+                except Exception:
+                    exemplar_boxes = []
+
+            try:
+                with inference_lock:
+                    if loca_detector is None:
+                        loca_detector = LOCADetector(models_dir=ROOT / "models", device="cpu")
+                    res = loca_detector.count(
+                        frame,
+                        exemplar_boxes=exemplar_boxes,
+                        zero_shot=is_zero_shot,
+                        threshold_rel=threshold_rel,
+                    )
+
+                canvas = res["canvas"]
+                image_buffer = BytesIO()
+                Image.fromarray(canvas[:, :, ::-1]).save(image_buffer, format="JPEG", quality=90)
+                encoded = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+
+                # Format detections table items from peaks
+                detections = [
+                    {
+                        "xyxy": [p["x"] - 12, p["y"] - 12, p["x"] + 12, p["y"] + 12],
+                        "confidence": round(p["score"], 3),
+                        "class_name": "loca_peak",
+                    }
+                    for p in res["peaks"]
+                ]
+
+                return jsonify(
+                    count=res["count"],
+                    raw_count=res["raw_count"],
+                    peaks_count=res["peaks_count"],
+                    peaks=res["peaks"],
+                    detections=detections,
+                    image="data:image/jpeg;base64," + encoded,
+                    width=int(frame.shape[1]),
+                    height=int(frame.shape[0]),
+                    inference_ms=res["inference_ms"],
+                    model=f"LOCA ({res['mode']})",
+                    model_type="loca",
+                    loca_mode=loca_mode,
+                )
+            except Exception:
+                app.logger.exception("LOCA inference failed")
+                return jsonify(error="Không thể xử lý ảnh bằng mô hình LOCA. Vui lòng kiểm tra file trọng số trong thư mục models."), 503
+
+        # -----------------------------
+        # 2. Xử lý mô hình YOLO11
+        # -----------------------------
         try:
             confidence = float(request.form.get("confidence", "0.4"))
         except (TypeError, ValueError):
@@ -163,16 +327,8 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
         sliced = request.form.get("sliced", "false").lower() in ("true", "1", "yes")
         enhance = request.form.get("enhance", "false").lower() in ("true", "1", "yes")
 
-        content = upload.read(MAX_UPLOAD_BYTES + 1)
-        if len(content) > MAX_UPLOAD_BYTES:
-            return upload_too_large(None)
-        try:
-            frame = decode_image(content)
-        except InvalidImage as exc:
-            return jsonify(error=str(exc)), exc.status
-
         if not weights_path.is_file():
-            return jsonify(error=f"Chưa tìm thấy mô hình. Vui lòng đặt {weights_path.name} trong thư mục models."), 503
+            return jsonify(error=f"Chưa tìm thấy mô hình YOLO. Vui lòng đặt {weights_path.name} trong thư mục models."), 503
         try:
             with inference_lock:
                 if detector is None:
@@ -196,13 +352,14 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                 height=int(frame.shape[0]),
                 inference_ms=inference_ms,
                 model=MODEL_NAME,
+                model_type="yolo11",
                 imgsz=imgsz,
                 sliced=sliced,
                 enhance=enhance,
             )
         except Exception:
             app.logger.exception("PC-case inference failed")
-            return jsonify(error="Không thể xử lý ảnh bằng mô hình. Vui lòng thử lại hoặc kiểm tra best.pt."), 503
+            return jsonify(error="Không thể xử lý ảnh bằng mô hình YOLO. Vui lòng thử lại hoặc kiểm tra best.pt."), 503
 
     return app
 

@@ -28,6 +28,9 @@ export interface EmployeeInput {
 }
 
 export interface RecognitionLog {
+  firstSeenAt?: string;
+  lastSeenAt?: string;
+  occurrenceCount?: number;
   id: number;
   employeeId: number | null;
   name: string;

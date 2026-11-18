@@ -1,5 +1,13 @@
 # AVTVN FaceID Frontend
 
+## Chạy bằng Docker
+powershell -ExecutionPolicy Bypass -File .\start-local.ps1
+.\BE\venv\Scripts\Activate.ps1
+
+Xem [hướng dẫn Docker](DOCKER.md) để chạy cả frontend và backend CPU bằng
+`docker compose up -d --build`. Dữ liệu Docker tách biệt với dữ liệu Windows;
+camera ngoài sẽ được tích hợp sau.
+
 Frontend quản lý nhân viên và theo dõi điểm danh cho hệ thống AVTVN FaceID Attendance. Ứng dụng sử dụng React + TypeScript, gọi Flask API và hiển thị trạng thái nhận diện được xử lý trên máy backend.
 
 Tài liệu tổng thể của cả hệ thống nằm tại [README dự án](../README.md).

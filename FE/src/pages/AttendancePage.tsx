@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import useEmployees from "../hooks/useEmployees";
 import api, { mediaUrl } from "../services/api";
 import type { Employee } from "../types";
+import LiveAttendanceCamera from "../components/LiveAttendanceCamera";
 
 function getLogPeriod(log: { recognizedAt: string; attendancePeriod?: "MORNING" | "AFTERNOON" | null }) {
   return log.attendancePeriod ?? (new Date(log.recognizedAt).getHours() < 12 ? "MORNING" : "AFTERNOON");
@@ -70,17 +71,47 @@ export default function AttendancePage() {
   const latestImage = latestEmployee?.primaryPhotoUrl ?? latestLog?.imageUrl;
   const cameraRunning = camera?.state === "RUNNING";
 
+  const handleToggleCamera = async () => {
+    try {
+      if (cameraRunning) {
+        await api.post("/camera/stop");
+      } else {
+        await api.post("/camera/start");
+      }
+      const response = await api.get<CameraStatus>("/camera/status");
+      setCamera(response.data);
+    } catch (err) {
+      console.error("Failed to toggle camera:", err);
+    }
+  };
+
   return (
     <div className="page-shell">
       <h2 className="page-title mb-8 px-4">Attendance status</h2>
 
+      <LiveAttendanceCamera />
+
       <div className="mb-6 grid gap-5 md:grid-cols-3">
         <section className="rounded-xl bg-white p-5">
-          <div className="flex items-center gap-3 text-[#3677b4]"><Camera size={28} /><h3 className="text-lg font-bold">Local camera</h3></div>
-          <p className={`mt-3 text-2xl font-bold ${cameraRunning ? "text-emerald-600" : "text-red-600"}`}>
-            {connectionError ? "BACKEND OFFLINE" : camera?.state ?? "CONNECTING"}
-          </p>
+          <div className="flex items-center gap-3 text-[#3677b4]"><Camera size={28} /><h3 className="text-lg font-bold">Camera OpenCV (backend)</h3></div>
+          <div className="mt-3 flex items-center justify-between">
+            <p className={`text-2xl font-bold ${cameraRunning ? "text-emerald-600" : "text-red-600"}`}>
+              {connectionError ? "BACKEND OFFLINE" : camera?.state ?? "CONNECTING"}
+            </p>
+            {!connectionError && (
+              <button
+                type="button"
+                onClick={handleToggleCamera}
+                className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition ${
+                  cameraRunning ? "bg-red-500 hover:bg-red-600" : "bg-emerald-600 hover:bg-emerald-700"
+                }`}
+              >
+                {cameraRunning ? "Tắt Camera" : "Bật lại Camera"}
+              </button>
+            )}
+          </div>
           <p className="mt-1 text-sm text-slate-500">Camera index: {camera?.cameraIndex ?? 0}</p>
+          <p className="mt-1 text-xs text-slate-500">Dành cho backend chạy trực tiếp trên máy. Với Docker, dùng camera trên web ở phía trên.</p>
         </section>
         <section className="rounded-xl bg-white p-5">
           <div className="flex items-center gap-3 text-[#3677b4]"><UsersRound size={28} /><h3 className="text-lg font-bold">Ready employees</h3></div>

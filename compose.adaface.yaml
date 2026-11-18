@@ -1,0 +1,11 @@
+# Use together with compose.yaml; switches the existing backend, not a second writer.
+services:
+  backend:
+    image: faceid-backend-adaface:local
+    build:
+      target: adaface
+    environment:
+      FACEID_BACKEND: adaface
+      FACEID_ADAFACE_REPO: /app/AdaFace
+      FACEID_ADAFACE_ARCH: ir_50
+      FACEID_ADAFACE_CKPT: /app/AdaFace/pretrained/adaface_ir50_webface4m.ckpt

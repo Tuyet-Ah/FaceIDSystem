@@ -1,0 +1,40 @@
+name: faceid
+
+services:
+  backend:
+    build:
+      context: ./BE
+      target: insightface
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      FACEID_DATABASE: /data/dtb.db
+      FACEID_DATASET_DIR: /data/dataset
+      FACEID_EMBEDDINGS_PATH: /data/employee_face_embeddings.pkl
+      FACEID_MODEL_NAME: ${FACEID_MODEL_NAME:-buffalo_l}
+      FACEID_BACKEND: insightface
+      FACEID_SHOW_CAMERA: "0"
+      FACEID_ENABLE_LOCAL_CAMERA: "0"
+    volumes:
+      - faceid_data:/data
+      - faceid_models:/home/faceid/.insightface
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 300s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./FE
+    ports:
+      - "127.0.0.1:${FACEID_WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  faceid_data:
+  faceid_models:

@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grounding DINO Object Counting (Transformers)</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-badge">Zero-Shot AI</div>
+        <div class="brand-titles">
+          <h1>Grounding DINO Object Counting</h1>
+          <p class="subtitle">Đếm và nhận diện đối tượng bằng mô hình Grounding DINO (Hugging Face Transformers)</p>
+        </div>
+      </div>
+      <div class="header-status">
+        <span id="model-pill" class="pill pill-model">IDEA-Research/grounding-dino-tiny</span>
+        <span id="device-pill" class="pill pill-device">CPU</span>
+        <span id="status-pill" class="pill pill-status status-ready">Sẵn sàng</span>
+      </div>
+    </header>
+
+    <!-- Main Grid -->
+    <main class="main-grid">
+      <!-- Left Panel: Controls & Input -->
+      <section class="panel control-panel">
+        <div class="card">
+          <div class="card-header">
+            <h3>1. Nguồn hình ảnh</h3>
+            <div class="tabs">
+              <button class="tab-btn active" data-tab="upload">Tải ảnh lên</button>
+              <button class="tab-btn" data-tab="camera">Webcam</button>
+              <button class="tab-btn" data-tab="samples">Ảnh mẫu</button>
+            </div>
+          </div>
+
+          <div class="card-body">
+            <!-- Upload Tab -->
+            <div id="tab-upload" class="tab-pane active">
+              <div id="drop-zone" class="drop-zone">
+                <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp">
+                <div class="drop-zone-content">
+                  <svg class="icon-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                  </svg>
+                  <p class="drop-text">Kéo thả ảnh vào đây hoặc <span>chọn file từ máy</span></p>
+                  <p class="drop-hint">Hỗ trợ JPG, PNG, WEBP</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Camera Tab -->
+            <div id="tab-camera" class="tab-pane">
+              <div class="camera-container">
+                <video id="webcam-video" autoplay playsinline></video>
+                <div class="camera-actions">
+                  <button id="btn-start-camera" class="btn btn-secondary">Bật Camera</button>
+                  <button id="btn-capture-camera" class="btn btn-primary" disabled>Chụp ảnh &amp; Đếm</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Samples Tab -->
+            <div id="tab-samples" class="tab-pane">
+              <div id="samples-list" class="samples-grid">
+                <!-- Dynamically populated -->
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Prompt & Model Settings Card -->
+        <div class="card">
+          <div class="card-header">
+            <h3>2. Text Prompt &amp; Cài đặt</h3>
+          </div>
+          <div class="card-body">
+            <div class="form-group">
+              <label for="prompt-input">
+                Đối tượng cần tìm kiếm &amp; đếm (Zero-Shot Prompt):
+              </label>
+              <input type="text" id="prompt-input" value="computer tower. pc case." placeholder="ví dụ: pc case, computer tower, keyboard, mouse">
+              <div class="chips-container">
+                <span class="chip-hint">Gợi ý nhanh:</span>
+                <button type="button" class="chip" data-prompt="pc case. computer tower.">PC Case / Thùng máy</button>
+                <button type="button" class="chip" data-prompt="monitor. computer screen.">Màn hình PC</button>
+                <button type="button" class="chip" data-prompt="keyboard. mouse.">Bàn phím &amp; Chuột</button>
+                <button type="button" class="chip" data-prompt="person.">Người (Person)</button>
+                <button type="button" class="chip" data-prompt="chair. desk.">Bàn &amp; Ghế</button>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group col">
+                <label for="box-threshold">
+                  Box Threshold (Độ tin cậy): <span id="box-threshold-val" class="badge-val">0.35</span>
+                </label>
+                <input type="range" id="box-threshold" min="0.10" max="0.90" step="0.05" value="0.35">
+              </div>
+
+              <div class="form-group col">
+                <label for="text-threshold">
+                  Text Threshold (Khớp từ khóa): <span id="text-threshold-val" class="badge-val">0.25</span>
+                </label>
+                <input type="range" id="text-threshold" min="0.10" max="0.80" step="0.05" value="0.25">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="roi-input">
+                Vùng đếm ROI (Tùy chọn: x1, y1, x2, y2):
+              </label>
+              <input type="text" id="roi-input" placeholder="Để trống nếu đếm toàn bộ ảnh, hoặc nhập: 50,50,500,400">
+            </div>
+
+            <button id="btn-count" class="btn btn-submit" disabled>
+              <span class="btn-spinner hidden" id="count-spinner"></span>
+              <span id="count-btn-text">Bắt đầu đếm (Detect &amp; Count)</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Panel: Results & Visualizer -->
+      <section class="panel result-panel">
+        <div class="card result-card">
+          <div class="card-header result-header">
+            <h3>Kết quả trực quan (Visual Result)</h3>
+            <div class="metrics-row">
+              <div class="metric-card">
+                <span class="metric-title">Số lượng đếm được</span>
+                <span id="metric-count" class="metric-value highlight">--</span>
+              </div>
+              <div class="metric-card">
+                <span class="metric-title">Thời gian suy luận</span>
+                <span id="metric-time" class="metric-value">-- ms</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-body result-body">
+            <div id="image-viewer" class="image-viewer">
+              <div id="placeholder" class="viewer-placeholder">
+                <svg class="placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                  <polyline points="21 15 16 10 5 21"></polyline>
+                </svg>
+                <p>Chưa có hình ảnh nào được tải lên hoặc đếm</p>
+                <p class="subtext">Chọn hoặc tải ảnh ở cột bên trái để bắt đầu</p>
+              </div>
+              <img id="result-img" class="result-image hidden" alt="Annotated Output">
+            </div>
+
+            <!-- Detections Table Card -->
+            <div id="details-section" class="details-section hidden">
+              <div class="details-header">
+                <h4>Chi tiết danh sách đối tượng nhận diện</h4>
+              </div>
+              <div class="table-wrapper">
+                <table class="detections-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Class Name</th>
+                      <th>Confidence</th>
+                      <th>BBox (x1, y1, x2, y2)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="detections-tbody">
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
