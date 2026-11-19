@@ -37,6 +37,8 @@ def build_parser():
 
 def annotate(frame, detections, roi=None):
     import cv2
+    from object_counting.text_utils import put_text_utf8
+
     canvas = frame.copy()
     if roi:
         cv2.rectangle(canvas, roi[:2], roi[2:], (255, 180, 0), 2)
@@ -45,9 +47,16 @@ def annotate(frame, detections, roi=None):
         cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 220, 0), 2)
         cv2.putText(canvas, f"pc_case {detection.confidence:.2f}", (x1, max(20, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 0), 2)
-    cv2.rectangle(canvas, (0, 0), (min(440, canvas.shape[1]), 48), (20, 20, 20), -1)
-    cv2.putText(canvas, f"PC cases visible: {len(detections)}", (10, 32),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+    canvas = put_text_utf8(
+        canvas,
+        f"Số thùng máy PC: {len(detections)}",
+        (15, 15),
+        font_size=18,
+        color_bgr=(0, 255, 255),
+        bg_color_bgr=(20, 20, 20),
+        padding=6,
+    )
     return canvas
 
 

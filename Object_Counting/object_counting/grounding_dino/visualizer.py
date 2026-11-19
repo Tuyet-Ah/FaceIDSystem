@@ -103,33 +103,19 @@ def annotate_image(
             cv2.LINE_AA,
         )
 
-    # Top banner with count summary
+    # Top banner with count summary (Unicode Vietnamese support)
+    from object_counting.text_utils import put_text_utf8
+
     total_count = len(detections)
-    banner_text = f"{title_prefix}: {total_count}"
-    (tw, th), tb = cv2.getTextSize(banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-    banner_w = max(tw + 28, 220)
-    banner_h = th + 24
-
-    # Dark rounded-like banner in top-left
-    overlay = canvas.copy()
-    cv2.rectangle(overlay, (8, 8), (8 + banner_w, 8 + banner_h), (20, 24, 30), -1)
-    cv2.addWeighted(overlay, 0.85, canvas, 0.15, 0, canvas)
-    cv2.rectangle(canvas, (8, 8), (8 + banner_w, 8 + banner_h), (50, 60, 75), 1)
-
-    # Banner indicator dot
-    dot_color = (46, 204, 113) if total_count > 0 else (140, 140, 140)
-    cv2.circle(canvas, (24, 8 + banner_h // 2), 6, dot_color, -1)
-
-    # Banner text
-    cv2.putText(
+    banner_text = f"{title_prefix}: {total_count} đối tượng"
+    canvas = put_text_utf8(
         canvas,
         banner_text,
-        (40, 8 + banner_h // 2 + th // 2 - 1),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.75,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
+        (15, 15),
+        font_size=18,
+        color_bgr=(255, 255, 255),
+        bg_color_bgr=(20, 24, 30),
+        padding=6,
     )
 
     return canvas
