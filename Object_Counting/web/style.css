@@ -1393,3 +1393,68 @@ input[type="range"]::-webkit-slider-thumb:hover {
   border-color: #c084fc;
   color: #e9d5ff;
 }
+
+/* AnomalyCLIP uses a score and heatmap rather than the object-count table. */
+.badge-anomalyclip {
+  background-color: rgba(244, 114, 182, 0.15);
+  color: #f9a8d4;
+  border-color: rgba(244, 114, 182, 0.3);
+}
+
+.anomaly-info,
+.anomaly-result-info {
+  padding: 1rem;
+  border: 1px solid rgba(244, 114, 182, 0.25);
+  border-radius: var(--radius-md);
+  background: rgba(244, 114, 182, 0.055);
+  color: var(--text-main);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.anomaly-info p,
+.anomaly-result-info p {
+  margin: 0.55rem 0 0;
+  color: var(--text-muted);
+}
+
+.anomaly-model-status {
+  padding: 0.75rem 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.anomaly-model-status.is-unavailable {
+  color: #fbbf24;
+}
+
+.anomaly-result-info h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
+.anomaly-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  font-size: 0.875rem;
+}
+
+.anomaly-legend-gradient {
+  flex: 1 1 120px;
+  height: 0.65rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #1626a5, #00a7ff, #23d9a0, #ffe740, #ff302b);
+}
+
+.model-toggle-group {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 420px) {
+  .model-toggle-group {
+    grid-template-columns: 1fr;
+  }
+}

@@ -10,6 +10,7 @@ Supports YOLO11, LOCA (Density Integral), and Grounding DINO with:
 
 import argparse
 import base64
+import gc
 from dataclasses import asdict
 from io import BytesIO
 import json
@@ -28,6 +29,8 @@ from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 from count import annotate
 from object_counting.cli import ROOT
 from object_counting.detection import CaseDetector
+from object_counting.anomalyclip import AnomalyCLIPDetector, asset_status as anomalyclip_asset_status
+from object_counting.anomaly_visualizer import render_anomaly_heatmap
 from object_counting.loca_detector import LOCADetector
 from object_counting.grounding_dino.detector import GroundingDinoDetector, format_text_prompt
 from object_counting.grounding_dino.visualizer import annotate_image as dino_annotate_image
@@ -37,6 +40,7 @@ from object_counting.shelf_pipeline import get_device_name, get_device_type, DEF
 MAX_UPLOAD_MB = 64
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 MAX_IMAGE_PIXELS = 100_000_000
+ANOMALY_MAX_IMAGE_PIXELS = 20_000_000
 ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
 MODEL_NAME = "YOLO11n"
 
@@ -68,8 +72,9 @@ class InvalidImage(ValueError):
         self.status = status
 
 
-def decode_image(content):
+def decode_image(content, max_pixels=None):
     """Decode actual supported file bytes and normalize EXIF orientation to BGR."""
+    pixel_limit = MAX_IMAGE_PIXELS if max_pixels is None else min(MAX_IMAGE_PIXELS, max_pixels)
     if not content:
         raise InvalidImage("Ảnh tải lên trống. Vui lòng chọn lại ảnh.")
     try:
@@ -78,8 +83,8 @@ def decode_image(content):
             with Image.open(BytesIO(content)) as image:
                 if image.format not in ALLOWED_FORMATS:
                     raise InvalidImage("Chỉ hỗ trợ ảnh JPEG, PNG hoặc WEBP.")
-                if image.width * image.height > MAX_IMAGE_PIXELS:
-                    raise InvalidImage(f"Ảnh quá lớn. Vui lòng dùng ảnh tối đa {MAX_IMAGE_PIXELS // 1_000_000} triệu điểm ảnh.", 413)
+                if image.width * image.height > pixel_limit:
+                    raise InvalidImage(f"Ảnh quá lớn. Vui lòng dùng ảnh tối đa {pixel_limit // 1_000_000} triệu điểm ảnh.", 413)
                 if getattr(image, "n_frames", 1) != 1:
                     raise InvalidImage("Vui lòng chọn ảnh tĩnh; ảnh động không được hỗ trợ.")
                 image.load()
@@ -104,7 +109,12 @@ def _default_detector_factory(weights, imgsz=960):
     return CaseDetector(str(weights), device=get_device_type(), imgsz=imgsz)
 
 
-def create_app(detector_factory=None, weights=None, default_imgsz=960):
+def _default_anomaly_factory(models_dir):
+    return AnomalyCLIPDetector(models_dir=models_dir, device=get_device_type(), image_size=336)
+
+
+def create_app(detector_factory=None, weights=None, default_imgsz=960,
+               anomaly_factory=None, anomaly_models_dir=None):
     """Create the service; an injected factory receives the weights Path once."""
     app = Flask(__name__, static_folder=str(ROOT / "web"), static_url_path="/static")
     app.request_class = MemoryUploadRequest
@@ -122,6 +132,9 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
     detector = None
     loca_detector = None
     dino_detector = None
+    anomaly_detector = None
+    anomaly_directory = Path(anomaly_models_dir) if anomaly_models_dir is not None else ROOT / "models"
+    anomaly_model_factory = anomaly_factory or _default_anomaly_factory
 
     loca_zero_path = ROOT / "models" / "loca_zero_shot.pth"
     loca_few_path = ROOT / "models" / "loca_few_shot.pth"
@@ -155,16 +168,25 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
     @app.get("/api/health")
     def health():
         yolo_ok = weights_path.is_file()
-        return jsonify(
-            ready=yolo_ok,
-            model=model_display_name,
-            max_upload_mb=MAX_UPLOAD_MB,
-            default_imgsz=default_imgsz,
-        )
+        anomaly_assets = anomalyclip_asset_status(anomaly_directory)
+        data = {
+            "ready": yolo_ok,
+            "model": model_display_name,
+            "max_upload_mb": MAX_UPLOAD_MB,
+            "default_imgsz": default_imgsz,
+        }
+        if not app.config.get("TESTING"):
+            data["anomalyclip"] = {
+                "ready": anomaly_assets["ready"],
+                "missing_assets": anomaly_assets["missing_assets"],
+                "device": get_device_name(),
+                "default_imgsz": 336,
+            }
+        return jsonify(data)
 
     @app.post("/api/detect")
     def detect():
-        nonlocal detector, loca_detector, dino_detector
+        nonlocal detector, loca_detector, dino_detector, anomaly_detector
         origin = request.headers.get("Origin")
         if origin:
             parsed_origin = urlsplit(origin)
@@ -176,12 +198,23 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
             return jsonify(error="Vui lòng chọn một ảnh để đếm đối tượng."), 400
 
         model_type = request.form.get("model_type", "yolo11").strip().lower()
-        if model_type not in ("yolo11", "loca", "grounding_dino", "dino"):
+        if model_type not in ("yolo11", "loca", "grounding_dino", "dino", "anomalyclip"):
             model_type = "yolo11"
 
         # Universal shelf switches
         use_split = form_bool("use_split", False)
         use_roi = form_bool("use_roi", False)
+
+        if model_type == "anomalyclip":
+            try:
+                anomaly_imgsz = int(request.form.get("anomaly_imgsz", "336"))
+                anomaly_opacity = float(request.form.get("anomaly_opacity", "0.45"))
+            except (TypeError, ValueError):
+                return jsonify(error="Cấu hình AnomalyCLIP không hợp lệ."), 400
+            if anomaly_imgsz not in (336, 518):
+                return jsonify(error="AnomalyCLIP hỗ trợ kích thước xử lý 336 hoặc 518."), 400
+            if not math.isfinite(anomaly_opacity) or not 0.2 <= anomaly_opacity <= 0.8:
+                return jsonify(error="Độ đậm bản đồ nhiệt phải từ 0.2 đến 0.8."), 400
 
         # Pre-validate YOLO parameters before decoding image / loading model
         if model_type == "yolo11":
@@ -203,9 +236,58 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
         if len(content) > MAX_UPLOAD_BYTES:
             return upload_too_large(None)
         try:
-            frame = decode_image(content)
+            frame = decode_image(content, ANOMALY_MAX_IMAGE_PIXELS if model_type == "anomalyclip" else None)
         except InvalidImage as exc:
             return jsonify(error=str(exc)), exc.status
+
+        # The full CLIP backbone is large. Release it before another model is
+        # requested; release the other cached models before loading AnomalyCLIP.
+        if model_type != "anomalyclip":
+            with inference_lock:
+                if anomaly_detector is not None:
+                    anomaly_detector = None
+                    gc.collect()
+
+        if model_type == "anomalyclip":
+            assets = anomalyclip_asset_status(anomaly_directory)
+            if not assets["ready"]:
+                return jsonify(error="Chưa đủ trọng số AnomalyCLIP. Chạy setup_anomalyclip.py trên máy rồi thử lại.",
+                               missing_assets=assets["missing_assets"]), 503
+            try:
+                with inference_lock:
+                    if anomaly_detector is None:
+                        detector, loca_detector, dino_detector = None, None, None
+                        gc.collect()
+                        anomaly_detector = anomaly_model_factory(anomaly_directory)
+                    anomaly_detector.image_size = anomaly_imgsz
+                    started = time.perf_counter()
+                    analysis = anomaly_detector.analyze(frame)
+                    inference_ms = round((time.perf_counter() - started) * 1000, 1)
+                score = float(analysis["anomaly_score"])
+                if not math.isfinite(score) or not 0 <= score <= 1:
+                    raise ValueError("Invalid anomaly score.")
+                overlay, heatmap, map_range = render_anomaly_heatmap(frame, analysis["anomaly_map"], anomaly_opacity)
+
+                def encode_canvas(canvas, image_format):
+                    image_buffer = BytesIO()
+                    Image.fromarray(canvas[:, :, ::-1]).save(image_buffer, format=image_format)
+                    return base64.b64encode(image_buffer.getvalue()).decode("ascii")
+
+                return jsonify(
+                    analysis_type="anomaly", model_type="anomalyclip", model="AnomalyCLIP",
+                    count=None, detections=[], anomaly_score=score,
+                    anomaly_map_min=map_range["minimum"], anomaly_map_max=map_range["maximum"],
+                    anomaly_map_flat=map_range["flat"],
+                    image="data:image/jpeg;base64," + encode_canvas(overlay, "JPEG"),
+                    heatmap="data:image/png;base64," + encode_canvas(heatmap, "PNG"),
+                    width=int(frame.shape[1]), height=int(frame.shape[0]),
+                    inference_ms=inference_ms, device=analysis.get("device", get_device_name()),
+                    anomaly_imgsz=anomaly_imgsz, anomaly_opacity=anomaly_opacity,
+                    use_split=False, use_roi=False,
+                )
+            except Exception:
+                app.logger.exception("AnomalyCLIP inference failed")
+                return jsonify(error="Không thể phân tích ảnh bằng AnomalyCLIP. Kiểm tra thư viện và trọng số, hoặc thử kích thước 336."), 503
 
         # -----------------------------
         # 1. Grounding DINO

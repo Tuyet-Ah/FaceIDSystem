@@ -1,6 +1,6 @@
 /**
  * Multi-Model Object & PC Case Counting Web Application
- * Supports YOLO11, LOCA (Density Integral), and Grounding DINO
+ * Supports YOLO11, LOCA, Grounding DINO, and AnomalyCLIP heatmaps.
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -12,8 +12,11 @@ document.addEventListener('DOMContentLoaded', () => {
   let isProcessing = false;
   let maxUploadBytes = 64 * 1024 * 1024;
   let maxUploadMb = 64;
+  let lastHealth = null;
+  let selectionVersion = 0;
+  let lastResultModel = null;
 
-  let currentModel = 'yolo11'; // 'yolo11', 'loca', or 'grounding_dino'
+  let currentModel = 'yolo11'; // Counting models or 'anomalyclip'.
   let locaMode = 'few_shot';   // 'few_shot' or 'zero_shot'
   let exemplarBoxes = [];      // [[x1, y1, x2, y2], ...] in original image coordinates
   let clickSquareSize = 110;   // Default square box size in original pixels for 1-click
@@ -49,14 +52,21 @@ document.addEventListener('DOMContentLoaded', () => {
   // Universal Preprocessing Controls
   const checkUseSplit = document.getElementById('check-use-split');
   const checkUseRoi = document.getElementById('check-use-roi');
+  const shelfPreprocessingGroup = document.getElementById('shelf-preprocessing-group');
 
   // Model Selector
   const btnModelYolo = document.getElementById('btn-model-yolo');
   const btnModelLoca = document.getElementById('btn-model-loca');
   const btnModelDino = document.getElementById('btn-model-dino');
+  const btnModelAnomaly = document.getElementById('btn-model-anomalyclip');
   const yoloConfigGroup = document.getElementById('yolo-config-group');
   const locaConfigGroup = document.getElementById('loca-config-group');
   const dinoConfigGroup = document.getElementById('dino-config-group');
+  const anomalyConfigGroup = document.getElementById('anomalyclip-config-group');
+  const anomalyImgszSelect = document.getElementById('anomaly-imgsz-select');
+  const anomalyOpacityRange = document.getElementById('anomaly-opacity-range');
+  const anomalyOpacityVal = document.getElementById('anomaly-opacity-val');
+  const anomalyStatus = document.getElementById('anomalyclip-status');
 
   // YOLO Parameters
   const imgszSelect = document.getElementById('imgsz-select');
@@ -125,6 +135,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const thScore = document.getElementById('th-score');
   const thCoords = document.getElementById('th-coords');
   const detectionsTbody = document.getElementById('detections-tbody');
+  const detectionsTableContainer = document.getElementById('detections-table-container');
+  const anomalyResultInfo = document.getElementById('anomaly-result-info');
 
   // Modal & Toast
   const modalZoom = document.getElementById('modal-zoom');
@@ -158,21 +170,63 @@ document.addEventListener('DOMContentLoaded', () => {
   // ----------------------------------------------------
   // Health & Service Check
   // ----------------------------------------------------
+  function renderHealth(data) {
+    const anomaly = data.anomalyclip;
+    if (anomaly) {
+      anomalyStatus.classList.toggle('is-unavailable', !anomaly.ready);
+      anomalyStatus.textContent = anomaly.ready
+        ? 'Đã có đủ trọng số AnomalyCLIP. Sẵn sàng phân tích ảnh.'
+        : 'AnomalyCLIP chưa sẵn sàng. Hoàn tất bước cài đặt mô hình rồi tải lại trang.';
+    } else {
+      anomalyStatus.classList.add('is-unavailable');
+      anomalyStatus.textContent = 'Máy chủ chưa cung cấp trạng thái AnomalyCLIP. Khởi động lại web sau khi cập nhật.';
+    }
+    if (currentModel === 'anomalyclip') {
+      statusPill.className = `status-pill ${anomaly && anomaly.ready ? 'status-ready' : 'status-loading'}`;
+      statusText.textContent = anomaly && anomaly.ready
+        ? `AnomalyCLIP sẵn sàng • ${anomaly.device || data.device || 'CPU'}`
+        : 'AnomalyCLIP chưa sẵn sàng';
+    } else {
+      statusPill.className = `status-pill ${data.ready ? 'status-ready' : 'status-loading'}`;
+      statusText.textContent = data.ready
+        ? `${data.model} sẵn sàng • ${data.device || 'CPU'}`
+        : `${data.model || 'Mô hình'} chưa sẵn sàng`;
+    }
+    updateDetectButton();
+  }
+
+  function actionLabel(model = currentModel) {
+    if (model === 'anomalyclip') return 'Phân tích bất thường bằng AnomalyCLIP';
+    if (model === 'loca') return 'Đếm mật độ bằng LOCA';
+    if (model === 'grounding_dino') return 'Nhận diện & Đếm bằng Grounding DINO';
+    return 'Nhận diện & Đếm bằng YOLO11';
+  }
+
+  function updateDetectButton() {
+    const anomalyUnavailable = currentModel === 'anomalyclip'
+      && !(lastHealth && lastHealth.anomalyclip && lastHealth.anomalyclip.ready === true);
+    btnDetect.disabled = isProcessing || !currentFile || anomalyUnavailable;
+  }
+
   async function checkHealth() {
     try {
       const res = await fetch('/api/health');
       if (!res.ok) throw new Error('Mất kết nối máy chủ');
       const data = await res.json();
-      statusPill.className = 'status-pill status-ready';
-      statusText.textContent = `${data.model} sẵn sàng • ${data.device || 'CPU'}`;
+      lastHealth = data;
+      renderHealth(data);
       if (data.max_upload_mb) {
         maxUploadMb = data.max_upload_mb;
         maxUploadBytes = maxUploadMb * 1024 * 1024;
         dropFormatsText.textContent = `Hỗ trợ JPG, PNG, WEBP (Tối đa ${maxUploadMb} MB)`;
       }
     } catch (err) {
+      lastHealth = null;
       statusPill.className = 'status-pill status-offline';
       statusText.textContent = 'Không thể kết nối Backend';
+      anomalyStatus.classList.add('is-unavailable');
+      anomalyStatus.textContent = 'Không thể kết nối máy chủ để kiểm tra AnomalyCLIP.';
+      updateDetectButton();
     }
   }
   checkHealth();
@@ -208,6 +262,9 @@ document.addEventListener('DOMContentLoaded', () => {
       dinoNmsThreshVal.textContent = parseFloat(e.target.value).toFixed(2);
     });
   }
+  anomalyOpacityRange.addEventListener('input', e => {
+    anomalyOpacityVal.textContent = Number(e.target.value).toFixed(2);
+  });
 
   // ----------------------------------------------------
   // Prompt Pills for Grounding DINO
@@ -227,31 +284,45 @@ document.addEventListener('DOMContentLoaded', () => {
   // Switch Model Tabs
   // ----------------------------------------------------
   function switchModel(model) {
+    if (currentModel !== model) {
+      selectionVersion += 1;
+      annotatedDataUrl = null;
+      lastResultModel = null;
+      statsWrapper.classList.add('hidden');
+      resultActions.classList.add('hidden');
+      imageAnnotated.classList.add('hidden');
+      imageOriginal.classList.remove('hidden');
+    }
     currentModel = model;
     btnModelYolo.classList.toggle('active', model === 'yolo11');
     btnModelLoca.classList.toggle('active', model === 'loca');
     btnModelDino.classList.toggle('active', model === 'grounding_dino');
+    btnModelAnomaly.classList.toggle('active', model === 'anomalyclip');
 
     yoloConfigGroup.classList.toggle('hidden', model !== 'yolo11');
     locaConfigGroup.classList.toggle('hidden', model !== 'loca');
     dinoConfigGroup.classList.toggle('hidden', model !== 'grounding_dino');
+    anomalyConfigGroup.classList.toggle('hidden', model !== 'anomalyclip');
+    shelfPreprocessingGroup.classList.toggle('hidden', model === 'anomalyclip');
+    checkUseSplit.disabled = model === 'anomalyclip';
+    checkUseRoi.disabled = model === 'anomalyclip';
+    detectBtnText.textContent = isProcessing ? 'Đang xử lý yêu cầu trước...' : actionLabel(model);
 
     if (model === 'loca') {
-      detectBtnText.textContent = 'Đếm mật độ bằng LOCA';
       updateWorkspaceBanner();
-    } else if (model === 'grounding_dino') {
-      detectBtnText.textContent = 'Nhận diện & Đếm bằng Grounding DINO';
-      workspaceBanner.classList.add('hidden');
     } else {
-      detectBtnText.textContent = 'Nhận diện & Đếm bằng YOLO11';
       workspaceBanner.classList.add('hidden');
     }
+    if (lastHealth) renderHealth(lastHealth);
+    if (model === 'anomalyclip') checkHealth();
+    updateDetectButton();
     redrawMainCanvas();
   }
 
   btnModelYolo.addEventListener('click', () => switchModel('yolo11'));
   btnModelLoca.addEventListener('click', () => switchModel('loca'));
   btnModelDino.addEventListener('click', () => switchModel('grounding_dino'));
+  btnModelAnomaly.addEventListener('click', () => switchModel('anomalyclip'));
 
   // ----------------------------------------------------
   // LOCA Mode & Fixed Exemplars
@@ -360,6 +431,9 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    selectionVersion += 1;
+    annotatedDataUrl = null;
+    lastResultModel = null;
     currentFile = file;
     if (currentPreviewUrl) {
       URL.revokeObjectURL(currentPreviewUrl);
@@ -370,7 +444,7 @@ document.addEventListener('DOMContentLoaded', () => {
     previewFilename.textContent = file.name || 'image.jpg';
     previewFilesize.textContent = `${(file.size / 1024).toFixed(0)} KB`;
     previewBox.classList.remove('hidden');
-    btnDetect.disabled = false;
+    updateDetectButton();
 
     emptyState.classList.add('hidden');
     resultContent.classList.remove('hidden');
@@ -392,6 +466,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function clearSelectedFile() {
+    selectionVersion += 1;
+    annotatedDataUrl = null;
+    lastResultModel = null;
     currentFile = null;
     if (currentPreviewUrl) {
       URL.revokeObjectURL(currentPreviewUrl);
@@ -465,6 +542,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function redrawMainCanvas() {
     const ctx = mainDrawCanvas.getContext('2d');
     ctx.clearRect(0, 0, mainDrawCanvas.width, mainDrawCanvas.height);
+    mainDrawCanvas.classList.toggle('drawing-disabled', currentModel !== 'loca' || locaMode !== 'few_shot');
 
     if (currentModel !== 'loca' || locaMode !== 'few_shot' || !imageOriginal.naturalWidth) return;
     const isFixed = checkLocaFixedExemplars && checkLocaFixedExemplars.checked;
@@ -527,6 +605,15 @@ document.addEventListener('DOMContentLoaded', () => {
   // ----------------------------------------------------
   async function performDetection() {
     if (!currentFile || isProcessing) return;
+    if (currentModel === 'anomalyclip'
+        && !(lastHealth && lastHealth.anomalyclip && lastHealth.anomalyclip.ready === true)) {
+      showToast('AnomalyCLIP chưa sẵn sàng. Hoàn tất cài đặt hoặc khởi động lại máy chủ web rồi tải lại trang.', 'error', 6500);
+      checkHealth();
+      return;
+    }
+    const requestedModel = currentModel;
+    const requestedFile = currentFile;
+    const requestedVersion = selectionVersion;
 
     const isFixed = checkLocaFixedExemplars && checkLocaFixedExemplars.checked;
     if (currentModel === 'loca' && locaMode === 'few_shot' && !isFixed && exemplarBoxes.length === 0) {
@@ -537,24 +624,36 @@ document.addEventListener('DOMContentLoaded', () => {
     isProcessing = true;
     btnDetect.disabled = true;
     detectSpinner.classList.remove('hidden');
+    statsWrapper.classList.add('hidden');
+    resultActions.classList.add('hidden');
+    annotatedDataUrl = null;
+    imageAnnotated.classList.add('hidden');
+    imageOriginal.classList.remove('hidden');
 
-    if (currentModel === 'loca') {
+    if (requestedModel === 'anomalyclip') {
+      detectBtnText.textContent = 'AnomalyCLIP đang phân tích...';
+    } else if (requestedModel === 'loca') {
       detectBtnText.textContent = 'LOCA đang tích phân mật độ...';
-    } else if (currentModel === 'grounding_dino') {
+    } else if (requestedModel === 'grounding_dino') {
       detectBtnText.textContent = 'Grounding DINO đang nhận diện...';
     } else {
       detectBtnText.textContent = 'YOLO11 đang quét nhận diện...';
     }
 
     const formData = new FormData();
-    formData.append('image', currentFile, currentFile.name || 'image.jpg');
-    formData.append('model_type', currentModel);
+    formData.append('image', requestedFile, requestedFile.name || 'image.jpg');
+    formData.append('model_type', requestedModel);
 
     // Universal shelf pre-processing
-    if (checkUseSplit) formData.append('use_split', checkUseSplit.checked ? 'true' : 'false');
-    if (checkUseRoi) formData.append('use_roi', checkUseRoi.checked ? 'true' : 'false');
+    if (requestedModel !== 'anomalyclip') {
+      if (checkUseSplit) formData.append('use_split', checkUseSplit.checked ? 'true' : 'false');
+      if (checkUseRoi) formData.append('use_roi', checkUseRoi.checked ? 'true' : 'false');
+    }
 
-    if (currentModel === 'loca') {
+    if (requestedModel === 'anomalyclip') {
+      formData.append('anomaly_imgsz', anomalyImgszSelect.value);
+      formData.append('anomaly_opacity', anomalyOpacityRange.value);
+    } else if (requestedModel === 'loca') {
       formData.append('loca_mode', locaMode);
       if (checkLocaFixedExemplars) {
         formData.append('use_fixed_exemplars', checkLocaFixedExemplars.checked ? 'true' : 'false');
@@ -566,7 +665,7 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('peak_min_relative', locaPeakRatioRange.value);
       }
       formData.append('exemplars', JSON.stringify(exemplarBoxes));
-    } else if (currentModel === 'grounding_dino') {
+    } else if (requestedModel === 'grounding_dino') {
       formData.append('prompt', dinoPromptInput ? dinoPromptInput.value : 'pc case.');
       if (dinoBoxThreshRange) formData.append('box_threshold', dinoBoxThreshRange.value);
       if (dinoNmsThreshRange) formData.append('nms_threshold', dinoNmsThreshRange.value);
@@ -589,25 +688,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Xử lý thất bại.');
+      if (requestedModel === 'anomalyclip' && data.model_type !== 'anomalyclip') {
+        throw new Error('Máy chủ chưa hỗ trợ AnomalyCLIP. Khởi động lại máy chủ web sau khi cập nhật rồi tải lại trang.');
+      }
+      if (requestedVersion !== selectionVersion || requestedFile !== currentFile) return;
 
       renderResults(data);
-      const countMsg = currentModel === 'loca'
-        ? `Đếm mật độ: ${data.count} (Tổng: ${data.raw_count})`
-        : `Tìm thấy: ${data.count} đối tượng`;
+      const countMsg = data.model_type === 'anomalyclip'
+        ? `Điểm bất thường: ${Number(data.anomaly_score).toFixed(3)}`
+        : data.model_type === 'loca'
+          ? `Đếm mật độ: ${data.count} (Tổng: ${data.raw_count})`
+          : `Tìm thấy: ${data.count} đối tượng`;
       showToast(`Hoàn tất (${data.model})! ${countMsg}.`, 'success');
     } catch (err) {
-      showToast(err.message || 'Lỗi khi gửi yêu cầu tới máy chủ.', 'error');
+      if (requestedVersion === selectionVersion) {
+        showToast(err.message || 'Lỗi khi gửi yêu cầu tới máy chủ.', 'error', 6500);
+      }
     } finally {
       isProcessing = false;
-      btnDetect.disabled = false;
+      updateDetectButton();
       detectSpinner.classList.add('hidden');
-      if (currentModel === 'loca') {
-        detectBtnText.textContent = 'Đếm mật độ bằng LOCA';
-      } else if (currentModel === 'grounding_dino') {
-        detectBtnText.textContent = 'Nhận diện & Đếm bằng Grounding DINO';
-      } else {
-        detectBtnText.textContent = 'Nhận diện & Đếm bằng YOLO11';
-      }
+      detectBtnText.textContent = actionLabel();
     }
   }
 
@@ -620,11 +721,21 @@ document.addEventListener('DOMContentLoaded', () => {
     statsWrapper.classList.remove('hidden');
     resultActions.classList.remove('hidden');
 
-    statCount.textContent = data.count;
+    const isAnomaly = data.model_type === 'anomalyclip';
+    lastResultModel = data.model_type;
+    detectionsTableContainer.classList.toggle('hidden', isAnomaly);
+    anomalyResultInfo.classList.toggle('hidden', !isAnomaly);
+    statCount.textContent = isAnomaly ? Number(data.anomaly_score).toFixed(3) : data.count;
     statTime.textContent = `${data.inference_ms} ms`;
     statRes.textContent = `${data.device || 'CPU'} • ${data.width}×${data.height}`;
 
-    if (data.model_type === 'loca') {
+    if (isAnomaly) {
+      statLabelCount.textContent = 'Điểm bất thường';
+      statLabelConf.textContent = 'Ý nghĩa điểm';
+      statConf.textContent = 'Tham khảo';
+      btnViewAnnotated.textContent = 'Bản đồ bất thường';
+      workspaceBanner.classList.add('hidden');
+    } else if (data.model_type === 'loca') {
       statLabelCount.textContent = 'Số lượng (Mật độ)';
       statLabelConf.textContent = 'Tổng mật độ thực';
       statConf.textContent = `${data.raw_count}`;
@@ -672,7 +783,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Populate detections table
     tableCount.textContent = data.detections ? data.detections.length : 0;
     detectionsTbody.innerHTML = '';
-    if (data.detections && data.detections.length > 0) {
+    if (!isAnomaly && data.detections && data.detections.length > 0) {
       data.detections.forEach((d, idx) => {
         const tr = document.createElement('tr');
         const coords = d.xyxy ? d.xyxy.map(c => Math.round(c)).join(', ') : '';
@@ -685,7 +796,7 @@ document.addEventListener('DOMContentLoaded', () => {
         `;
         detectionsTbody.appendChild(tr);
       });
-    } else {
+    } else if (!isAnomaly) {
       detectionsTbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #888;">Không phát hiện đối tượng nào.</td></tr>`;
     }
   }
@@ -714,7 +825,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!targetUrl) return;
     const a = document.createElement('a');
     a.href = targetUrl;
-    a.download = `counted_${Date.now()}.jpg`;
+    a.download = `${lastResultModel === 'anomalyclip' ? 'anomalyclip_heatmap' : 'counted'}_${Date.now()}.jpg`;
     a.click();
   });
 

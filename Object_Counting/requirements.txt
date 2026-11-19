@@ -7,3 +7,7 @@ Flask>=3.1,<4
 Pillow>=10.4,<14
 scipy>=1.11
 gdown>=5.0
+ftfy>=6.3,<7
+regex>=2024.0
+packaging>=24
+tqdm>=4.65,<5

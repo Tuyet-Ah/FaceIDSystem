@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Đếm Case Máy Tính - PC Case Counter</title>
-  <link rel="stylesheet" href="/static/style.css?v=4.0">
-  <script src="/static/app.js?v=4.0" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=5.0">
+  <script src="/static/app.js?v=5.0" defer></script>
 </head>
 <body>
   <div class="app-layout">
@@ -22,7 +22,7 @@
         </div>
         <div class="brand-text">
           <h1>Hệ Thống Đếm Đối Tượng (Object &amp; PC Case Counter)</h1>
-          <p class="brand-subtitle">So sánh 3 phương pháp: <strong>YOLO11</strong> (Box), <strong>LOCA</strong> (Mật độ SOTA), và <strong>Grounding DINO</strong> (Zero-Shot Text Prompt)</p>
+          <p class="brand-subtitle">Đếm đối tượng với <strong>YOLO11</strong>, <strong>LOCA</strong>, <strong>Grounding DINO</strong> và xem vùng bất thường với <strong>AnomalyCLIP</strong>.</p>
         </div>
       </div>
       <div class="header-status">
@@ -119,10 +119,10 @@
         </div>
 
         <!-- Universal Preprocessing & Shelf Enhancements -->
-        <div class="config-section" style="border: 1px solid rgba(0, 180, 255, 0.3); border-radius: 8px; padding: 12px; background: rgba(0, 100, 200, 0.04);">
+        <div id="shelf-preprocessing-group" class="config-section" style="border: 1px solid rgba(0, 180, 255, 0.3); border-radius: 8px; padding: 12px; background: rgba(0, 100, 200, 0.04);">
           <div class="config-header" style="margin-bottom: 8px;">
             <strong style="color: #0099ff; display: flex; align-items: center; gap: 6px;">
-              ⚡ Tiền xử lý kệ (Dùng chung cho cả 3 Model)
+              ⚡ Tiền xử lý kệ (Dùng cho các mô hình đếm)
             </strong>
           </div>
           <label class="toggle-control" style="margin-bottom: 8px;">
@@ -143,7 +143,7 @@
 
         <!-- Model Architecture Selector -->
         <div class="config-section model-selector-card">
-          <label class="config-label">Chọn Mô hình Đếm:</label>
+          <label class="config-label">Chọn mô hình phân tích:</label>
           <div class="model-toggle-group">
             <button type="button" id="btn-model-yolo" class="model-toggle-btn active" data-model="yolo11">
               <div class="model-btn-top">
@@ -168,6 +168,14 @@
               </div>
               <strong class="model-name">Grounding DINO</strong>
               <small class="model-desc">Đếm theo câu chữ (Text Prompt)</small>
+            </button>
+            <button type="button" id="btn-model-anomalyclip" class="model-toggle-btn" data-model="anomalyclip">
+              <div class="model-btn-top">
+                <span class="model-badge badge-anomalyclip">Anomaly</span>
+                <span class="model-version">Zero-Shot</span>
+              </div>
+              <strong class="model-name">AnomalyCLIP</strong>
+              <small class="model-desc">Điểm bất thường và bản đồ nhiệt</small>
             </button>
           </div>
         </div>
@@ -362,6 +370,34 @@
           </div>
         </div>
 
+        <!-- ================= ANOMALYCLIP CONFIG GROUP ================= -->
+        <div id="anomalyclip-config-group" class="model-config-group hidden">
+          <div class="anomaly-info">
+            <strong>Phân tích bất thường trên toàn ảnh</strong>
+            <p>AnomalyCLIP đánh dấu vùng có đặc điểm bất thường theo mô hình. Chế độ này không đếm case, không xác nhận thiếu máy hoặc mất cắp.</p>
+            <p>Điểm bất thường là điểm mô hình chưa hiệu chuẩn cho kệ PC, không phải phần trăm chính xác hay xác suất có lỗi.</p>
+          </div>
+          <div class="config-section">
+            <div class="config-header">
+              <label for="anomaly-imgsz-select" class="config-label">Độ phân giải xử lý:</label>
+              <select id="anomaly-imgsz-select" class="config-select">
+                <option value="336" selected>336 px (Nhẹ hơn, phù hợp CPU)</option>
+                <option value="518">518 px (Thiết lập tham chiếu, xử lý lâu hơn)</option>
+              </select>
+            </div>
+            <p class="config-help">Lần đầu cần nạp mô hình. Với CPU, hãy đợi quá trình phân tích hoàn tất.</p>
+          </div>
+          <div class="config-section">
+            <div class="config-header">
+              <label for="anomaly-opacity-range" class="config-label">Độ phủ màu bản đồ nhiệt:</label>
+              <span id="anomaly-opacity-val" class="config-badge">0.45</span>
+            </div>
+            <input type="range" id="anomaly-opacity-range" min="0.20" max="0.80" step="0.05" value="0.45">
+            <p class="config-help">Điều chỉnh độ đậm lớp màu trên ảnh; không thay đổi điểm bất thường. Bấm phân tích lại để áp dụng.</p>
+          </div>
+          <p id="anomalyclip-status" class="anomaly-model-status" role="status">Đang kiểm tra mô hình AnomalyCLIP...</p>
+        </div>
+
         <!-- Action Button -->
         <div class="action-section">
           <button type="button" id="btn-detect" class="btn btn-primary btn-block" disabled>
@@ -374,7 +410,7 @@
       <!-- Results Column -->
       <section class="panel panel-result">
         <div class="panel-header">
-          <h2>Kết quả nhận diện</h2>
+          <h2>Kết quả phân tích</h2>
           <div id="result-actions" class="result-actions hidden">
             <div class="view-switch">
               <button type="button" id="btn-view-annotated" class="switch-btn active">Ảnh nhận diện</button>
@@ -489,8 +525,18 @@
               </div>
             </div>
 
+            <div id="anomaly-result-info" class="anomaly-result-info hidden">
+              <h3>Bản đồ bất thường AnomalyCLIP</h3>
+              <div class="anomaly-legend" aria-label="Thang màu bản đồ nhiệt, từ điểm thấp đến điểm cao trong ảnh">
+                <span>Thấp trong ảnh</span>
+                <div class="anomaly-legend-gradient"></div>
+                <span>Cao trong ảnh</span>
+              </div>
+              <p>Màu nóng chỉ vùng được mô hình chấm điểm cao hơn trong ảnh. Cần đối chiếu với ảnh gốc; kết quả không xác nhận máy bị lỗi, bị thiếu hoặc bị mất.</p>
+            </div>
+
             <!-- Bounding Boxes Table -->
-            <div class="table-container">
+            <div id="detections-table-container" class="table-container">
               <h3 class="table-title"><span id="table-title-text">Chi tiết các đối tượng phát hiện</span> (<span id="table-count">0</span>)</h3>
               <div class="table-wrapper">
                 <table class="detections-table">
