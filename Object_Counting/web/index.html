@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Đếm Case Máy Tính - PC Case Counter</title>
-  <link rel="stylesheet" href="/static/style.css?v=3.2">
-  <script src="/static/app.js?v=3.2" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=4.0">
+  <script src="/static/app.js?v=4.0" defer></script>
 </head>
 <body>
   <div class="app-layout">
@@ -22,7 +22,7 @@
         </div>
         <div class="brand-text">
           <h1>Hệ Thống Đếm Đối Tượng (Object &amp; PC Case Counter)</h1>
-          <p class="brand-subtitle">Hỗ trợ chuyển đổi linh hoạt giữa 3 mô hình: <strong>YOLO11</strong> (Box), <strong>LOCA</strong> (Bản đồ nhiệt SOTA), và <strong>Grounding DINO</strong> (Đếm theo câu chữ Prompt)</p>
+          <p class="brand-subtitle">So sánh 3 phương pháp: <strong>YOLO11</strong> (Box), <strong>LOCA</strong> (Mật độ SOTA), và <strong>Grounding DINO</strong> (Zero-Shot Text Prompt)</p>
         </div>
       </div>
       <div class="header-status">
@@ -88,12 +88,12 @@
         <!-- Sample Section -->
         <div id="sample-section" class="tab-content hidden">
           <div class="sample-box">
-            <p class="sample-desc">Sử dụng ảnh mẫu máy tính để kiểm thử nhanh mô hình nhận diện:</p>
+            <p class="sample-desc">Sử dụng ảnh mẫu kệ máy tính thực tế (720×1280):</p>
             <div class="sample-card">
               <img src="/static/sample.jpg" alt="Ảnh mẫu test case" class="sample-thumbnail">
               <div class="sample-card-info">
                 <strong>Ảnh kệ máy tính kiểm thử</strong>
-                <span class="sample-meta">JPEG • Kệ máy tính thực tế</span>
+                <span class="sample-meta">JPEG 720×1280 • Kệ 2 tầng</span>
                 <button type="button" id="btn-load-sample" class="btn btn-sm btn-secondary">Dùng ảnh này</button>
               </div>
             </div>
@@ -118,6 +118,29 @@
           </button>
         </div>
 
+        <!-- Universal Preprocessing & Shelf Enhancements -->
+        <div class="config-section" style="border: 1px solid rgba(0, 180, 255, 0.3); border-radius: 8px; padding: 12px; background: rgba(0, 100, 200, 0.04);">
+          <div class="config-header" style="margin-bottom: 8px;">
+            <strong style="color: #0099ff; display: flex; align-items: center; gap: 6px;">
+              ⚡ Tiền xử lý kệ (Dùng chung cho cả 3 Model)
+            </strong>
+          </div>
+          <label class="toggle-control" style="margin-bottom: 8px;">
+            <input type="checkbox" id="check-use-split">
+            <span class="toggle-label">
+              <strong>✂️ Cắt 2 nửa trên/dưới (10% chồng lấn &amp; NMS)</strong>
+              <small>Chạy model riêng từng nửa rồi gộp box; khắc phục đếm thiếu case nhỏ ở hàng trên.</small>
+            </span>
+          </label>
+          <label class="toggle-control">
+            <input type="checkbox" id="check-use-roi">
+            <span class="toggle-label">
+              <strong>📦 Cắt theo ROI vùng kệ (Loại bỏ sàn nhà)</strong>
+              <small>Chỉ giữ vùng kệ, loại bỏ phản chiếu dưới nền gạch hoặc vật thể ở sàn.</small>
+            </span>
+          </label>
+        </div>
+
         <!-- Model Architecture Selector -->
         <div class="config-section model-selector-card">
           <label class="config-label">Chọn Mô hình Đếm:</label>
@@ -133,15 +156,15 @@
             <button type="button" id="btn-model-loca" class="model-toggle-btn" data-model="loca">
               <div class="model-btn-top">
                 <span class="model-badge badge-loca">Low-Shot</span>
-                <span class="model-version">ICCV 2023</span>
+                <span class="model-version">Mật độ</span>
               </div>
               <strong class="model-name">LOCA</strong>
-              <small class="model-desc">Bản đồ nhiệt mật độ (Zero/Few-Shot)</small>
+              <small class="model-desc">Bản đồ nhiệt tích phân (Zero/Few-Shot)</small>
             </button>
             <button type="button" id="btn-model-dino" class="model-toggle-btn" data-model="grounding_dino">
               <div class="model-btn-top">
                 <span class="model-badge badge-dino">Open-Vocab</span>
-                <span class="model-version">Tiny</span>
+                <span class="model-version">Zero-Shot</span>
               </div>
               <strong class="model-name">Grounding DINO</strong>
               <small class="model-desc">Đếm theo câu chữ (Text Prompt)</small>
@@ -155,43 +178,51 @@
             <div class="config-header">
               <label for="imgsz-select" class="config-label">Độ phân giải xử lý (imgsz):</label>
               <select id="imgsz-select" class="config-select">
-                <option value="640">640 px (Tiêu chuẩn / Nhanh)</option>
-                <option value="960" selected>960 px (Chi tiết / Kệ &amp; Góc khuất)</option>
+                <option value="640">640 px (Tiêu chuẩn)</option>
+                <option value="960" selected>960 px (Khuyên dùng / Chi tiết hàng trên)</option>
                 <option value="1280">1280 px (Siêu nét / Dàn máy ở xa)</option>
               </select>
             </div>
-            <p class="config-help">imgsz 960 hoặc 1280 giúp phóng lớn và bắt trọn từng case nhỏ xếp san sát trên kệ.</p>
+            <p class="config-help">imgsz 960 hoặc 1280 giúp nhận diện chính xác case nhỏ xếp san sát ở hàng trên.</p>
           </div>
 
           <div class="config-section">
             <div class="config-header">
               <label for="confidence-range" class="config-label">Ngưỡng tin cậy (Confidence):</label>
-              <span id="confidence-val" class="config-badge">0.40 (40%)</span>
+              <span id="confidence-val" class="config-badge">0.35 (35%)</span>
             </div>
-            <input type="range" id="confidence-range" min="0.1" max="0.9" step="0.05" value="0.4">
+            <input type="range" id="confidence-range" min="0.1" max="0.8" step="0.05" value="0.35">
             <div class="range-labels">
-              <span>0.1 (Nhận diện rộng)</span>
-              <span>0.5 (Cân bằng)</span>
-              <span>0.9 (Rất chặt)</span>
+              <span>0.1 (Rộng)</span>
+              <span>0.35 (Chuẩn kệ)</span>
+              <span>0.8 (Chặt)</span>
             </div>
-            <p class="config-help">Hạ ngưỡng (0.25 - 0.35) để bắt thêm các case bị che khuất một phần.</p>
+            <p class="config-help">Khuyên dùng 0.25 - 0.40 để bắt thêm các case bị che khuất ở góc.</p>
           </div>
 
-          <!-- Distance & Enhancement Options -->
           <div class="config-section">
-            <div class="enhancement-title">Tùy chọn nâng cao cho vật thể ở xa &amp; kệ:</div>
+            <div class="config-header">
+              <label for="yolo-nms-range" class="config-label">Ngưỡng NMS IoU:</label>
+              <span id="yolo-nms-val" class="config-badge">0.55</span>
+            </div>
+            <input type="range" id="yolo-nms-range" min="0.40" max="0.80" step="0.05" value="0.55">
+            <p class="config-help">Ngưỡng IoU loại bỏ các box chồng chéo nhau khi gộp vùng.</p>
+          </div>
+
+          <div class="config-section">
+            <div class="enhancement-title">Tùy chọn bổ trợ:</div>
             <label class="toggle-control">
-              <input type="checkbox" id="check-sliced" checked>
+              <input type="checkbox" id="check-sliced">
               <span class="toggle-label">
-                <strong>🔍 Quét chi tiết tầm xa (Zoom Slice / SAHI)</strong>
-                <small>Chia nhỏ ảnh để soi rõ case ở xa với độ phân giải gốc 100%.</small>
+                <strong>🔍 Quét chi tiết tầm xa (Tiling / SAHI)</strong>
+                <small>Chia lưới ô nhỏ cho ảnh có nhiều vật thể li ti.</small>
               </span>
             </label>
             <label class="toggle-control">
               <input type="checkbox" id="check-enhance">
               <span class="toggle-label">
-                <strong>✨ Tăng tương phản &amp; làm rõ viền (CLAHE)</strong>
-                <small>Làm sắc nét các case trong bóng tối hoặc góc kệ bị mờ.</small>
+                <strong>✨ Tăng tương phản viền (CLAHE)</strong>
+                <small>Làm nét các case trong bóng tối hoặc góc kệ bị mờ.</small>
               </span>
             </label>
           </div>
@@ -199,40 +230,63 @@
 
         <!-- ================= LOCA CONFIG GROUP ================= -->
         <div id="loca-config-group" class="model-config-group hidden">
+          <div class="config-section" style="background: rgba(255, 180, 0, 0.08); padding: 10px; border-radius: 6px;">
+            <p style="margin: 0; font-size: 0.85rem; color: #d97706;">
+              ⚠️ <strong>Lưu ý:</strong> Số đếm chính thức của LOCA là <strong>Tổng bản đồ mật độ (làm tròn)</strong>, không dùng số đỉnh (peaks) vì đỉnh dễ bị nhiễu bởi đèn LED/quạt.
+            </p>
+          </div>
+
           <div class="config-section">
             <div class="config-header">
               <label class="config-label">Chế độ hoạt động LOCA:</label>
             </div>
             <div class="loca-mode-switch">
               <label class="loca-radio-label">
-                <input type="radio" name="loca-mode" value="zero_shot" id="radio-loca-zero" checked>
+                <input type="radio" name="loca-mode" value="few_shot" id="radio-loca-few" checked>
                 <div class="loca-radio-card">
-                  <strong>Zero-Shot (Không cần mẫu)</strong>
-                  <small>Tự nhận diện các cụm đối tượng lặp lại trên toàn ảnh</small>
+                  <strong>Few-Shot (Bộ mẫu đối tượng)</strong>
+                  <small>Dùng 3 khung mẫu case máy tính chuẩn</small>
                 </div>
               </label>
               <label class="loca-radio-label">
-                <input type="radio" name="loca-mode" value="few_shot" id="radio-loca-few">
+                <input type="radio" name="loca-mode" value="zero_shot" id="radio-loca-zero">
                 <div class="loca-radio-card">
-                  <strong>Few-Shot (Khoanh mẫu đối tượng)</strong>
-                  <small>Vẽ 1–3 khung mẫu (exemplar) để tìm các vật thể tương tự</small>
+                  <strong>Zero-Shot (Không cần mẫu)</strong>
+                  <small>Tự tìm các cụm đối tượng lặp lại</small>
                 </div>
               </label>
             </div>
           </div>
 
-          <!-- Few-shot Drawing Helper -->
+          <div class="config-section">
+            <label class="toggle-control" style="margin-bottom: 8px;">
+              <input type="checkbox" id="check-loca-fixed-exemplars" checked>
+              <span class="toggle-label">
+                <strong>🎯 Dùng 3 khung mẫu chuẩn cố định (Cả hàng trên &amp; dưới)</strong>
+                <small>Lấy từ ảnh ngoài test set, ôm trọn thân case, áp dụng đồng nhất cả kệ.</small>
+              </span>
+            </label>
+            <label class="toggle-control">
+              <input type="checkbox" id="check-loca-pad-square" checked>
+              <span class="toggle-label">
+                <strong>📐 Đệm ảnh vuông (Pad Square) chống méo ảnh dọc</strong>
+                <small>Giữ nguyên tỉ lệ 1:1 cho ảnh dọc 720×1280, tránh làm dẹt thân case.</small>
+              </span>
+            </label>
+          </div>
+
+          <!-- Few-shot Drawing Helper (when not using fixed) -->
           <div id="loca-few-shot-helper" class="config-section few-shot-box hidden">
             <div class="few-shot-header">
               <div class="few-shot-title">
-                <span>🎯 Khoanh mẫu đối tượng:</span>
+                <span>🎯 Tự vẽ mẫu thủ công:</span>
                 <span id="exemplar-count-badge" class="badge-exemplar">0 / 3 mẫu</span>
               </div>
               <button type="button" id="btn-clear-exemplars" class="btn btn-sm btn-ghost" title="Xóa các mẫu đã vẽ">Xóa tất cả</button>
             </div>
             
             <p class="few-shot-guide">
-              👉 <strong>Cách khoanh siêu nhanh:</strong> Chỉ cần <strong>Click chuột vào giữa thùng máy</strong> ở ảnh to bên phải để đặt khung vuông ngay lập tức, hoặc giữ chuột và kéo để tự vẽ kích thước tùy ý.
+              👉 Click vào giữa thùng máy ở ảnh bên phải hoặc kéo chuột để tự vẽ mẫu.
             </p>
 
             <div class="box-size-controls">
@@ -247,16 +301,11 @@
 
           <div class="config-section">
             <div class="config-header">
-              <label for="loca-threshold-range" class="config-label">Độ nhạy phát hiện đỉnh (Peak Threshold):</label>
-              <span id="loca-threshold-val" class="config-badge">0.12 (12%)</span>
+              <label for="loca-peak-ratio-range" class="config-label">Lọc đỉnh nhiễu (Chỉ giữ đỉnh &ge; % đỉnh cao nhất):</label>
+              <span id="loca-peak-ratio-val" class="config-badge">0.35 (35%)</span>
             </div>
-            <input type="range" id="loca-threshold-range" min="0.05" max="0.40" step="0.01" value="0.12">
-            <div class="range-labels">
-              <span>0.05 (Rất nhạy / Bắt nhiều đỉnh)</span>
-              <span>0.12 (Chuẩn)</span>
-              <span>0.40 (Chỉ lấy tâm đậm)</span>
-            </div>
-            <p class="config-help">Điều chỉnh ngưỡng để lọc bớt hoặc tăng số lượng đỉnh cực đại trên bản đồ nhiệt mật độ.</p>
+            <input type="range" id="loca-peak-ratio-range" min="0.20" max="0.60" step="0.05" value="0.35">
+            <p class="config-help">Chỉ dùng để lọc bớt chấm đỏ trên bản đồ nhiệt; không làm thay đổi số đếm mật độ.</p>
           </div>
         </div>
 
@@ -266,47 +315,50 @@
             <div class="config-header">
               <label for="dino-prompt-input" class="config-label">Câu lệnh mô tả đối tượng (Text Prompt):</label>
             </div>
-            <input type="text" id="dino-prompt-input" class="config-text-input" value="pc case. computer tower." placeholder="Ví dụ: pc case. monitor. keyboard. person.">
+            <input type="text" id="dino-prompt-input" class="config-text-input" value="pc case." placeholder="Ví dụ: pc case. computer tower.">
             
             <div class="prompt-pills-container">
-              <span class="pills-title">Gợi ý nhanh:</span>
+              <span class="pills-title">Chọn nhanh prompt chuẩn:</span>
               <div class="prompt-pills">
-                <button type="button" class="btn-prompt-pill active" data-prompt="pc case. computer tower.">🖥️ Thùng máy PC</button>
-                <button type="button" class="btn-prompt-pill" data-prompt="computer monitor. screen.">📺 Màn hình</button>
-                <button type="button" class="btn-prompt-pill" data-prompt="keyboard. computer mouse.">⌨️ Phím &amp; Chuột</button>
-                <button type="button" class="btn-prompt-pill" data-prompt="person.">👤 Con người</button>
-                <button type="button" class="btn-prompt-pill" data-prompt="box. package.">📦 Hộp / Kiện</button>
+                <button type="button" class="btn-prompt-pill active" data-prompt="pc case.">🖥️ pc case.</button>
+                <button type="button" class="btn-prompt-pill" data-prompt="computer tower.">🗼 computer tower.</button>
+                <button type="button" class="btn-prompt-pill" data-prompt="desktop computer tower.">💻 desktop computer tower.</button>
               </div>
             </div>
-            <p class="config-help">Grounding DINO hiểu văn bản tự nhiên, bạn có thể nhập bất kỳ từ khóa nào ngăn cách bởi dấu chấm.</p>
+            <p class="config-help">Prompt phải là chữ thường và kết thúc bằng dấu chấm (.).</p>
           </div>
 
           <div class="config-section">
             <div class="config-header">
               <label for="dino-box-thresh-range" class="config-label">Ngưỡng Hộp (Box Threshold):</label>
-              <span id="dino-box-thresh-val" class="config-badge">0.35 (35%)</span>
+              <span id="dino-box-thresh-val" class="config-badge">0.20 (20%)</span>
             </div>
-            <input type="range" id="dino-box-thresh-range" min="0.10" max="0.80" step="0.05" value="0.35">
+            <input type="range" id="dino-box-thresh-range" min="0.10" max="0.50" step="0.02" value="0.20">
             <div class="range-labels">
-              <span>0.10 (Bắt rộng)</span>
-              <span>0.35 (Chuẩn)</span>
-              <span>0.80 (Rất chặt)</span>
+              <span>0.10 (Bắt rất rộng)</span>
+              <span>0.20 (Khuyên dùng kệ)</span>
+              <span>0.50 (Chặt)</span>
             </div>
-            <p class="config-help">Độ tự tin phát hiện vị trí vật thể.</p>
+            <p class="config-help">Hạ xuống 0.15 - 0.25 để bắt trọn các case ở hàng trên (chỉ đạt điểm 0.27 - 0.34).</p>
           </div>
 
           <div class="config-section">
             <div class="config-header">
-              <label for="dino-text-thresh-range" class="config-label">Ngưỡng Từ Ngữ (Text Threshold):</label>
-              <span id="dino-text-thresh-val" class="config-badge">0.25 (25%)</span>
+              <label for="dino-nms-thresh-range" class="config-label">Ngưỡng NMS IoU:</label>
+              <span id="dino-nms-thresh-val" class="config-badge">0.50</span>
             </div>
-            <input type="range" id="dino-text-thresh-range" min="0.10" max="0.80" step="0.05" value="0.25">
-            <div class="range-labels">
-              <span>0.10 (Khớp lỏng)</span>
-              <span>0.25 (Chuẩn)</span>
-              <span>0.80 (Khớp chặt)</span>
-            </div>
-            <p class="config-help">Mức độ tương đồng ngữ nghĩa giữa hình ảnh và từ khóa bạn nhập.</p>
+            <input type="range" id="dino-nms-thresh-range" min="0.30" max="0.70" step="0.05" value="0.50">
+            <p class="config-help">Khử các box trùng nhau của cùng một case.</p>
+          </div>
+
+          <div class="config-section">
+            <label class="toggle-control">
+              <input type="checkbox" id="check-dino-filter-large" checked>
+              <span class="toggle-label">
+                <strong>🛡️ Lọc bỏ box lớn &gt; 30% diện tích ảnh</strong>
+                <small>Khắc phục lỗi box to bao cả kệ máy tính làm dư 1 đối tượng.</small>
+              </span>
+            </label>
           </div>
         </div>
 
@@ -357,7 +409,7 @@
             </svg>
           </div>
           <h3>Chưa có hình ảnh được chọn</h3>
-          <p>Tải ảnh case máy tính ở khung bên trái hoặc chụp từ camera/chọn ảnh mẫu để bắt đầu.</p>
+          <p>Tải ảnh case máy tính ở khung bên trái hoặc chọn ảnh mẫu để bắt đầu.</p>
         </div>
 
         <!-- Live Results Container -->
@@ -418,8 +470,8 @@
                   </svg>
                 </div>
                 <div class="stat-info">
-                  <span class="stat-label">Kích thước ảnh</span>
-                  <span id="stat-res" class="stat-value">0 × 0</span>
+                  <span class="stat-label">Thiết bị &amp; Khổ ảnh</span>
+                  <span id="stat-res" class="stat-value">CPU • 0×0</span>
                 </div>
               </div>
 

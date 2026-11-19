@@ -1,6 +1,19 @@
-"""LOCA (Low-Shot Object Counting) detector and visualizer."""
+"""LOCA (Low-Shot Object Counting) detector and visualizer.
 
+Improvements for Shelf PC Counting:
+- Density map integral (rounded to int) as official count, NOT peaks count.
+- Filter peaks to only keep prominent peaks (>= 30-50% of maximum peak) inside ROI.
+- Fixed 3-exemplar set from non-test reference frame covering upper & lower rows.
+- Square letterbox padding option to prevent vertical distortion on 720x1280 images.
+- Upper/lower 2-half split option with overlap density blending.
+- ROI shelf cropping option to cut out floor clutter.
+"""
+
+from __future__ import annotations
 from pathlib import Path
+import time
+from typing import List, Optional, Tuple, Union
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -10,11 +23,25 @@ from torchvision import transforms as T
 
 from object_counting.cli import ROOT
 from object_counting.loca.models.loca import LOCA
+from object_counting.shelf_pipeline import (
+    DEFAULT_FIXED_EXEMPLARS,
+    crop_to_roi,
+    get_device_type,
+    get_device_name,
+    pad_to_square,
+    split_image_halves,
+    unpad_density_map,
+    merge_halves_density_maps,
+)
 
 
 class LOCADetector:
-    def __init__(self, models_dir=None, device="cpu"):
-        self.device = torch.device(device)
+    def __init__(self, models_dir=None, device=None):
+        if device is None:
+            self.device_str = get_device_type()
+        else:
+            self.device_str = device
+        self.device = torch.device(self.device_str)
         self.models_dir = Path(models_dir) if models_dir else ROOT / "models"
         self._zero_model = None
         self._few_model = None
@@ -75,13 +102,13 @@ class LOCADetector:
             self._few_model = model
         return self._few_model
 
-    def count(self, bgr_image, exemplar_boxes=None, zero_shot=True, threshold_rel=0.12):
-        """
-        Run inference on bgr_image.
-        exemplar_boxes: list of [x1, y1, x2, y2] in original image pixel coordinates.
-        Returns dict with count, peaks, canvas, heatmap_raw, inference_ms.
-        """
-        import time
+    def _infer_density(
+        self,
+        bgr_image: np.ndarray,
+        exemplar_boxes: Optional[List[List[float]]] = None,
+        zero_shot: bool = True,
+    ) -> np.ndarray:
+        """Run single forward pass, return 2D density map at (H, W) of input bgr_image."""
         orig_h, orig_w = bgr_image.shape[:2]
         rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb)
@@ -93,10 +120,8 @@ class LOCADetector:
         if zero_shot or not exemplar_boxes:
             model = self.get_zero_shot_model()
             bboxes = torch.zeros((1, 3, 4), dtype=torch.float32, device=self.device)
-            mode_name = "Zero-Shot"
         else:
             model = self.get_few_shot_model()
-            # prepare 3 boxes
             boxes_norm = []
             for box in exemplar_boxes[:3]:
                 x1, y1, x2, y2 = box
@@ -106,64 +131,191 @@ class LOCADetector:
                     float(max(x1, x2)) * scale_x,
                     float(max(y1, y2)) * scale_y,
                 ])
-            # duplicate if less than 3 boxes
             while len(boxes_norm) < 3:
                 boxes_norm.append(boxes_norm[-1])
             bboxes = torch.tensor([boxes_norm], dtype=torch.float32, device=self.device)
-            mode_name = f"Few-Shot ({len(exemplar_boxes)} mẫu)"
 
-        started = time.perf_counter()
         with torch.no_grad():
             density_out, _ = model(x, bboxes)
-            density = density_out.squeeze().cpu().numpy()
+            density_512 = density_out.squeeze().cpu().numpy()
+
+        # Resize density map back to original input dimensions
+        # Note: Sum of density is preserved when scaling
+        density_resized = cv2.resize(density_512, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+        # Normalize sum so integral matches 512x512 output
+        sum_512 = float(np.sum(density_512))
+        sum_resized = float(np.sum(density_resized))
+        if sum_resized > 1e-6:
+            density_resized = density_resized * (sum_512 / sum_resized)
+
+        return np.maximum(density_resized, 0.0)
+
+    def count(
+        self,
+        bgr_image: np.ndarray,
+        exemplar_boxes: Optional[List[List[float]]] = None,
+        zero_shot: bool = True,
+        use_fixed_exemplars: bool = False,
+        pad_square: bool = False,
+        use_split: bool = False,
+        split_overlap: float = 0.10,
+        use_roi: bool = False,
+        roi: Optional[Tuple[int, int, int, int]] = None,
+        peak_min_relative: float = 0.35,
+        threshold_rel: float = 0.12,
+    ) -> dict:
+        """Run LOCA inference with shelf optimizations.
+
+        Returns:
+            dict containing:
+            - count: official rounded count (integer)
+            - raw_count: float sum of density
+            - peaks_count: count of filtered peaks
+            - peaks: list of {x, y, score}
+            - canvas: annotated image BGR
+            - inference_ms: runtime in ms
+            - mode: mode string description
+            - device: GPU/CPU info
+        """
+        orig_h, orig_w = bgr_image.shape[:2]
+        started = time.perf_counter()
+
+        # Resolve exemplars
+        if use_fixed_exemplars and (zero_shot or not exemplar_boxes):
+            exemplar_boxes = DEFAULT_FIXED_EXEMPLARS
+            zero_shot = False
+
+        mode_name = "Zero-Shot" if (zero_shot or not exemplar_boxes) else f"Few-Shot ({len(exemplar_boxes)} mẫu)"
+
+        # 1. Apply ROI if requested
+        working_img = bgr_image
+        offset_x, offset_y = 0, 0
+        if use_roi:
+            working_img, offset_x, offset_y = crop_to_roi(bgr_image, roi)
+
+        work_h, work_w = working_img.shape[:2]
+
+        # 2. Inference: with or without split
+        if use_split:
+            (upper_crop, _, _), (lower_crop, _, lower_offset_y) = split_image_halves(
+                working_img, overlap_ratio=split_overlap
+            )
+            # Run upper
+            upper_dmap = self._infer_density(upper_crop, exemplar_boxes, zero_shot)
+            # Run lower
+            # If exemplars given in original coordinates, offset for lower crop if needed
+            lower_exemplars = None
+            if exemplar_boxes and not zero_shot:
+                lower_exemplars = []
+                for b in exemplar_boxes:
+                    bx1, by1, bx2, by2 = b
+                    # If box falls in lower half, remap
+                    lower_exemplars.append([bx1, max(0.0, by1 - lower_offset_y), bx2, max(0.0, by2 - lower_offset_y)])
+
+            lower_dmap = self._infer_density(lower_crop, lower_exemplars, zero_shot)
+
+            # Merge density maps
+            work_dmap = merge_halves_density_maps(
+                upper_dmap, lower_dmap, work_h, work_w, lower_offset_y
+            )
+        elif pad_square and (work_h != work_w):
+            # Letterbox pad to square to prevent vertical aspect distortion
+            padded_img, pad_left, pad_top, sq_size = pad_to_square(working_img)
+            # Offset exemplars if needed
+            padded_exemplars = None
+            if exemplar_boxes and not zero_shot:
+                padded_exemplars = [
+                    [b[0] + pad_left, b[1] + pad_top, b[2] + pad_left, b[3] + pad_top]
+                    for b in exemplar_boxes
+                ]
+            sq_dmap = self._infer_density(padded_img, padded_exemplars, zero_shot)
+            work_dmap = unpad_density_map(sq_dmap, work_h, work_w, pad_left, pad_top, sq_size)
+        else:
+            work_dmap = self._infer_density(working_img, exemplar_boxes, zero_shot)
+
+        # 3. If ROI was cropped, embed back to full-size density map
+        if use_roi:
+            full_dmap = np.zeros((orig_h, orig_w), dtype=np.float32)
+            full_dmap[offset_y : offset_y + work_h, offset_x : offset_x + work_w] = work_dmap
+            density = full_dmap
+        else:
+            density = work_dmap
+
         inference_ms = round((time.perf_counter() - started) * 1000, 1)
 
-        raw_sum = float(np.sum(density))
-        count = max(0.0, raw_sum)
+        # Official count is density map integral
+        raw_count = float(np.sum(density))
+        official_count = int(round(raw_count))
 
-        # Find local peaks
-        peaks = self._extract_peaks(density, min_distance=12, threshold_rel=threshold_rel)
-        scaled_peaks = []
-        inv_scale_x = float(orig_w) / self.image_size
-        inv_scale_y = float(orig_h) / self.image_size
-        for p in peaks:
-            scaled_peaks.append({
-                "x": int(round(p["x"] * inv_scale_x)),
-                "y": int(round(p["y"] * inv_scale_y)),
-                "score": float(p["score"]),
-            })
+        # Peak extraction with thresholding and ROI filtering
+        peaks = self._extract_peaks(
+            density,
+            min_distance=15,
+            threshold_rel=threshold_rel,
+            peak_min_relative=peak_min_relative,
+            roi=roi if use_roi else None,
+        )
 
-        # Generate visual overlay
         canvas = self._render_visualization(
-            bgr_image, density, scaled_peaks, exemplar_boxes if not zero_shot else None,
-            count, mode_name
+            bgr_image, density, peaks,
+            exemplar_boxes if not zero_shot else None,
+            official_count, raw_count, mode_name,
         )
 
         return {
-            "count": round(count, 1),
-            "raw_count": count,
-            "peaks_count": len(scaled_peaks),
-            "peaks": scaled_peaks,
+            "count": official_count,
+            "raw_count": round(raw_count, 2),
+            "density_sum": raw_count,
+            "peaks_count": len(peaks),
+            "peaks": peaks,
             "canvas": canvas,
             "inference_ms": inference_ms,
             "mode": mode_name,
+            "device": get_device_name(),
         }
 
-    def _extract_peaks(self, dmap, min_distance=12, threshold_rel=0.12):
+    def _extract_peaks(
+        self,
+        dmap: np.ndarray,
+        min_distance: int = 15,
+        threshold_rel: float = 0.12,
+        peak_min_relative: float = 0.35,
+        roi: Optional[Tuple[int, int, int, int]] = None,
+    ) -> List[dict]:
+        """Extract prominent local maxima, filtering noise and keeping peaks >= 35% of max peak."""
         max_val = float(np.max(dmap))
         if max_val <= 1e-6:
             return []
-        threshold = max_val * threshold_rel
+
+        # Cutoff: at least threshold_rel * max_val AND peak_min_relative * max_val
+        effective_threshold = max_val * max(threshold_rel, peak_min_relative)
         neighborhood = maximum_filter(dmap, size=min_distance)
-        peak_mask = (dmap == neighborhood) & (dmap > threshold)
+        peak_mask = (dmap == neighborhood) & (dmap >= effective_threshold)
+
         y_coords, x_coords = np.nonzero(peak_mask)
-        peaks = [{"x": int(x), "y": int(y), "score": float(dmap[y, x])} for x, y in zip(x_coords, y_coords)]
+        peaks = []
+        for x, y in zip(x_coords, y_coords):
+            # Check ROI if provided
+            if roi is not None:
+                rx1, ry1, rx2, ry2 = roi
+                if not (rx1 <= x <= rx2 and ry1 <= y <= ry2):
+                    continue
+            peaks.append({"x": int(x), "y": int(y), "score": float(dmap[y, x])})
+
         return sorted(peaks, key=lambda p: p["score"], reverse=True)
 
-    def _render_visualization(self, bgr_image, density, peaks, exemplar_boxes, count, mode_name):
+    def _render_visualization(
+        self,
+        bgr_image: np.ndarray,
+        density: np.ndarray,
+        peaks: List[dict],
+        exemplar_boxes: Optional[List[List[float]]],
+        official_count: int,
+        raw_count: float,
+        mode_name: str,
+    ) -> np.ndarray:
         orig_h, orig_w = bgr_image.shape[:2]
 
-        # Normalize density map for colormap display
         d_norm = density.copy()
         d_norm = np.maximum(d_norm, 0)
         d_max = np.max(d_norm)
@@ -174,32 +326,33 @@ class LOCADetector:
 
         heatmap = cv2.applyColorMap(d_norm, cv2.COLORMAP_JET)
         heatmap_resized = cv2.resize(heatmap, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-
-        # Blend original image and heatmap
         overlay = cv2.addWeighted(bgr_image, 0.65, heatmap_resized, 0.35, 0)
 
-        # Draw peaks as high-contrast dots with rings
+        # Draw peaks as dots
         for p in peaks:
             px, py = p["x"], p["y"]
             cv2.circle(overlay, (px, py), 6, (255, 255, 255), -1, cv2.LINE_AA)
             cv2.circle(overlay, (px, py), 4, (0, 0, 255), -1, cv2.LINE_AA)
             cv2.circle(overlay, (px, py), 12, (0, 255, 255), 1, cv2.LINE_AA)
 
-        # Draw exemplar bounding boxes if few-shot
+        from object_counting.text_utils import put_text_utf8
+
+        # Draw exemplars
         if exemplar_boxes:
             for i, box in enumerate(exemplar_boxes):
                 x1, y1, x2, y2 = [int(v) for v in box]
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 165, 255), 3, cv2.LINE_AA)
-                label = f"Mau #{i + 1}"
-                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                cv2.rectangle(overlay, (x1, max(0, y1 - lh - 8)), (x1 + lw + 8, y1), (0, 165, 255), -1)
-                cv2.putText(overlay, label, (x1 + 4, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                label = f"Mẫu #{i + 1}"
+                overlay = put_text_utf8(
+                    overlay, label, (x1, max(0, y1 - 22)),
+                    font_size=14, color_bgr=(255, 255, 255), bg_color_bgr=(0, 165, 255), padding=3
+                )
 
-        # Header badge
-        badge_text = f"LOCA {mode_name}: {count:.1f} vat the (Dinh: {len(peaks)})"
-        (bw, bh), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-        cv2.rectangle(overlay, (15, 15), (25 + bw, 35 + bh), (20, 20, 20), -1)
-        cv2.rectangle(overlay, (15, 15), (25 + bw, 35 + bh), (0, 200, 255), 2)
-        cv2.putText(overlay, badge_text, (20, 25 + bh), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 230, 255), 2, cv2.LINE_AA)
+        # Header badge showing official rounded count from density integral
+        badge_text = f"LOCA {mode_name}: {official_count} case (Mật độ: {raw_count:.2f}, Đỉnh: {len(peaks)})"
+        overlay = put_text_utf8(
+            overlay, badge_text, (20, 20),
+            font_size=18, color_bgr=(0, 230, 255), bg_color_bgr=(20, 20, 20), padding=6
+        )
 
         return overlay

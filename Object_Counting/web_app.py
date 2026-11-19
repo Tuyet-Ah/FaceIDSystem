@@ -1,4 +1,12 @@
-"""Local photo-upload interface for the trained PC-case detector."""
+"""Local photo-upload interface for the trained PC-case detector.
+
+Supports YOLO11, LOCA (Density Integral), and Grounding DINO with:
+- Shelf ROI pre-processing (removes floor/ceiling)
+- 2-half splitting (upper/lower with overlap) for small cases in top row
+- Box NMS merging and large box suppression (> 30% area)
+- Aspect-ratio preserving square padding for LOCA
+- Device (GPU/CPU) and inference latency logging
+"""
 
 import argparse
 import base64
@@ -21,8 +29,9 @@ from count import annotate
 from object_counting.cli import ROOT
 from object_counting.detection import CaseDetector
 from object_counting.loca_detector import LOCADetector
-from object_counting.grounding_dino.detector import GroundingDinoDetector
+from object_counting.grounding_dino.detector import GroundingDinoDetector, format_text_prompt
 from object_counting.grounding_dino.visualizer import annotate_image as dino_annotate_image
+from object_counting.shelf_pipeline import get_device_name, get_device_type, DEFAULT_FIXED_EXEMPLARS
 
 
 MAX_UPLOAD_MB = 64
@@ -84,11 +93,15 @@ def decode_image(content):
         raise InvalidImage("Không đọc được ảnh. Hãy chọn file JPEG, PNG hoặc WEBP hợp lệ.") from None
 
 
-def _default_detector_factory(weights, imgsz=960):
-    import torch
+def form_bool(name: str, default: bool = False) -> bool:
+    val = request.form.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("true", "1", "yes", "on")
 
-    torch.set_num_threads(2)
-    return CaseDetector(str(weights), device="cpu", imgsz=imgsz)
+
+def _default_detector_factory(weights, imgsz=960):
+    return CaseDetector(str(weights), device=get_device_type(), imgsz=imgsz)
 
 
 def create_app(detector_factory=None, weights=None, default_imgsz=960):
@@ -98,7 +111,7 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
     app.config.update(
         MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
         MAX_FORM_MEMORY_SIZE=64 * 1024,
-        MAX_FORM_PARTS=8,
+        MAX_FORM_PARTS=16,
         TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"],
     )
     app.json.ensure_ascii = False
@@ -119,7 +132,7 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; connect-src 'self'; "
             "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
         )
@@ -142,14 +155,8 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
     @app.get("/api/health")
     def health():
         yolo_ok = weights_path.is_file()
-        loca_ok = loca_zero_path.is_file() or loca_few_path.is_file()
         return jsonify(
-            ready=yolo_ok or loca_ok,
-            yolo_ready=yolo_ok,
-            loca_ready=loca_ok,
-            loca_zero_ready=loca_zero_path.is_file(),
-            loca_few_ready=loca_few_path.is_file(),
-            dino_ready=True,
+            ready=yolo_ok,
             model=model_display_name,
             max_upload_mb=MAX_UPLOAD_MB,
             default_imgsz=default_imgsz,
@@ -172,6 +179,26 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
         if model_type not in ("yolo11", "loca", "grounding_dino", "dino"):
             model_type = "yolo11"
 
+        # Universal shelf switches
+        use_split = form_bool("use_split", False)
+        use_roi = form_bool("use_roi", False)
+
+        # Pre-validate YOLO parameters before decoding image / loading model
+        if model_type == "yolo11":
+            try:
+                confidence = float(request.form.get("confidence", "0.4"))
+            except (TypeError, ValueError):
+                return jsonify(error="Ngưỡng nhận diện phải từ 0.1 đến 0.9."), 400
+            if not math.isfinite(confidence) or not 0.1 <= confidence <= 0.9:
+                return jsonify(error="Ngưỡng nhận diện phải từ 0.1 đến 0.9."), 400
+
+            try:
+                imgsz = int(request.form.get("imgsz", str(default_imgsz)))
+            except (TypeError, ValueError):
+                return jsonify(error="Độ phân giải xử lý (imgsz) phải là số nguyên."), 400
+            if not (32 <= imgsz <= 2048 and imgsz % 32 == 0):
+                return jsonify(error="Độ phân giải xử lý phải là bội số của 32 từ 32 đến 2048."), 400
+
         content = upload.read(MAX_UPLOAD_BYTES + 1)
         if len(content) > MAX_UPLOAD_BYTES:
             return upload_too_large(None)
@@ -181,16 +208,15 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
             return jsonify(error=str(exc)), exc.status
 
         # -----------------------------
-        # 1. Xử lý Grounding DINO
+        # 1. Grounding DINO
         # -----------------------------
         if model_type in ("grounding_dino", "dino"):
-            prompt = request.form.get("prompt", "pc case. computer tower.").strip()
-            if not prompt:
-                prompt = "pc case. computer tower."
+            raw_prompt = request.form.get("prompt", "pc case.").strip()
+            prompt = format_text_prompt(raw_prompt)
             try:
-                box_threshold = float(request.form.get("box_threshold", "0.35"))
+                box_threshold = float(request.form.get("box_threshold", "0.20"))
             except (TypeError, ValueError):
-                box_threshold = 0.35
+                box_threshold = 0.20
             try:
                 text_threshold = float(request.form.get("text_threshold", "0.25"))
             except (TypeError, ValueError):
@@ -199,11 +225,15 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                 nms_threshold = float(request.form.get("nms_threshold", "0.50"))
             except (TypeError, ValueError):
                 nms_threshold = 0.50
+            filter_large_boxes = form_bool("filter_large_boxes", True)
 
             try:
                 with inference_lock:
                     if dino_detector is None:
-                        dino_detector = GroundingDinoDetector(model_id="IDEA-Research/grounding-dino-tiny", device="cpu")
+                        dino_detector = GroundingDinoDetector(
+                            model_id="IDEA-Research/grounding-dino-tiny",
+                            device=get_device_type(),
+                        )
                     started = time.perf_counter()
                     dino_detections = dino_detector.detect(
                         frame,
@@ -211,6 +241,10 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                         box_threshold=box_threshold,
                         text_threshold=text_threshold,
                         nms_threshold=nms_threshold,
+                        filter_large_boxes=filter_large_boxes,
+                        max_area_ratio=0.30,
+                        use_roi=use_roi,
+                        use_split=use_split,
                     )
                     inference_ms = round((time.perf_counter() - started) * 1000, 1)
 
@@ -231,28 +265,39 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                     width=int(frame.shape[1]),
                     height=int(frame.shape[0]),
                     inference_ms=inference_ms,
+                    device=get_device_name(),
                     model=f"Grounding DINO ({prompt})",
                     model_type="grounding_dino",
                     prompt=prompt,
+                    use_split=use_split,
+                    use_roi=use_roi,
                 )
             except Exception:
                 app.logger.exception("Grounding DINO inference failed")
                 return jsonify(error="Không thể xử lý ảnh bằng mô hình Grounding DINO. Vui lòng thử lại."), 503
 
         # -----------------------------
-        # 1. Xử lý mô hình LOCA
+        # 2. LOCA
         # -----------------------------
         if model_type == "loca":
-            loca_mode = request.form.get("loca_mode", "zero_shot").strip().lower()
-            is_zero_shot = (loca_mode != "few_shot")
+            loca_mode = request.form.get("loca_mode", "few_shot").strip().lower()
+            is_zero_shot = (loca_mode == "zero_shot")
+            use_fixed_exemplars = form_bool("use_fixed_exemplars", False)
+            pad_square = form_bool("pad_square", True)
+            try:
+                peak_min_relative = float(request.form.get("peak_min_relative", "0.35"))
+            except (TypeError, ValueError):
+                peak_min_relative = 0.35
             try:
                 threshold_rel = float(request.form.get("threshold_rel", "0.12"))
             except (TypeError, ValueError):
                 threshold_rel = 0.12
-            threshold_rel = max(0.01, min(0.6, threshold_rel))
 
             exemplar_boxes = []
-            if not is_zero_shot:
+            if use_fixed_exemplars:
+                exemplar_boxes = DEFAULT_FIXED_EXEMPLARS
+                is_zero_shot = False
+            elif not is_zero_shot:
                 exemplar_raw = request.form.get("exemplars", "[]")
                 try:
                     parsed_boxes = json.loads(exemplar_raw)
@@ -266,11 +311,16 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
             try:
                 with inference_lock:
                     if loca_detector is None:
-                        loca_detector = LOCADetector(models_dir=ROOT / "models", device="cpu")
+                        loca_detector = LOCADetector(models_dir=ROOT / "models", device=get_device_type())
                     res = loca_detector.count(
                         frame,
                         exemplar_boxes=exemplar_boxes,
                         zero_shot=is_zero_shot,
+                        use_fixed_exemplars=use_fixed_exemplars,
+                        pad_square=pad_square,
+                        use_split=use_split,
+                        use_roi=use_roi,
+                        peak_min_relative=peak_min_relative,
                         threshold_rel=threshold_rel,
                     )
 
@@ -279,7 +329,6 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                 Image.fromarray(canvas[:, :, ::-1]).save(image_buffer, format="JPEG", quality=90)
                 encoded = base64.b64encode(image_buffer.getvalue()).decode("ascii")
 
-                # Format detections table items from peaks
                 detections = [
                     {
                         "xyxy": [p["x"] - 12, p["y"] - 12, p["x"] + 12, p["y"] + 12],
@@ -292,6 +341,7 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                 return jsonify(
                     count=res["count"],
                     raw_count=res["raw_count"],
+                    density_sum=res["density_sum"],
                     peaks_count=res["peaks_count"],
                     peaks=res["peaks"],
                     detections=detections,
@@ -299,47 +349,47 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                     width=int(frame.shape[1]),
                     height=int(frame.shape[0]),
                     inference_ms=res["inference_ms"],
+                    device=res["device"],
                     model=f"LOCA ({res['mode']})",
                     model_type="loca",
                     loca_mode=loca_mode,
+                    use_split=use_split,
+                    use_roi=use_roi,
                 )
             except Exception:
                 app.logger.exception("LOCA inference failed")
                 return jsonify(error="Không thể xử lý ảnh bằng mô hình LOCA. Vui lòng kiểm tra file trọng số trong thư mục models."), 503
 
         # -----------------------------
-        # 2. Xử lý mô hình YOLO11
+        # 3. YOLO11
         # -----------------------------
-        try:
-            confidence = float(request.form.get("confidence", "0.4"))
-        except (TypeError, ValueError):
-            return jsonify(error="Ngưỡng nhận diện phải là số từ 0.1 đến 0.9."), 400
-        if not math.isfinite(confidence) or not 0.1 <= confidence <= 0.9:
-            return jsonify(error="Ngưỡng nhận diện phải từ 0.1 đến 0.9."), 400
-
-        try:
-            imgsz = int(request.form.get("imgsz", str(default_imgsz)))
-        except (TypeError, ValueError):
-            return jsonify(error="Độ phân giải xử lý (imgsz) phải là số nguyên."), 400
-        if not (32 <= imgsz <= 2048 and imgsz % 32 == 0):
-            return jsonify(error="Độ phân giải xử lý phải là bội số của 32 từ 32 đến 2048."), 400
-
-        sliced = request.form.get("sliced", "false").lower() in ("true", "1", "yes")
-        enhance = request.form.get("enhance", "false").lower() in ("true", "1", "yes")
-
         if not weights_path.is_file():
-            return jsonify(error=f"Chưa tìm thấy mô hình YOLO. Vui lòng đặt {weights_path.name} trong thư mục models."), 503
+            return jsonify(error=f"Chưa tìm thấy mô hình YOLO. Vui lòng đặt best.pt hoặc {weights_path.name} trong thư mục models."), 503
+
+        try:
+            nms_iou = float(request.form.get("nms_iou", "0.55"))
+        except (TypeError, ValueError):
+            nms_iou = 0.55
+
+        sliced = form_bool("sliced", False)
+        enhance = form_bool("enhance", False)
+
         try:
             with inference_lock:
                 if detector is None:
                     detector = factory(weights_path)
                 detector.confidence = confidence
                 detector.imgsz = imgsz
+                detector.nms_iou = nms_iou
                 detector.sliced = sliced
                 detector.enhance_contrast = enhance
+                detector.use_split = use_split
+                detector.use_roi = use_roi
+
                 started = time.perf_counter()
                 detections = detector.detect(frame)
                 inference_ms = round((time.perf_counter() - started) * 1000, 1)
+
             canvas = annotate(frame, detections)
             image_buffer = BytesIO()
             Image.fromarray(canvas[:, :, ::-1]).save(image_buffer, format="JPEG", quality=90)
@@ -351,15 +401,20 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960):
                 width=int(frame.shape[1]),
                 height=int(frame.shape[0]),
                 inference_ms=inference_ms,
+                device=get_device_name(),
                 model=MODEL_NAME,
                 model_type="yolo11",
                 imgsz=imgsz,
+                confidence=confidence,
+                nms_iou=nms_iou,
                 sliced=sliced,
                 enhance=enhance,
+                use_split=use_split,
+                use_roi=use_roi,
             )
         except Exception:
             app.logger.exception("PC-case inference failed")
-            return jsonify(error="Không thể xử lý ảnh bằng mô hình YOLO. Vui lòng thử lại hoặc kiểm tra best.pt."), 503
+            return jsonify(error="Không thể xử lý ảnh bằng mô hình YOLO. Vui lòng thử lại."), 503
 
     return app
 

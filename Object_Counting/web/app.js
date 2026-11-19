@@ -1,6 +1,6 @@
 /**
  * Multi-Model Object & PC Case Counting Web Application
- * Supports YOLO11 (Bounding Box) & LOCA (Low-Shot Density Map)
+ * Supports YOLO11, LOCA (Density Integral), and Grounding DINO
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -13,8 +13,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let maxUploadBytes = 64 * 1024 * 1024;
   let maxUploadMb = 64;
 
-  let currentModel = 'yolo11'; // 'yolo11' or 'loca'
-  let locaMode = 'zero_shot';  // 'zero_shot' or 'few_shot'
+  let currentModel = 'yolo11'; // 'yolo11', 'loca', or 'grounding_dino'
+  let locaMode = 'few_shot';   // 'few_shot' or 'zero_shot'
   let exemplarBoxes = [];      // [[x1, y1, x2, y2], ...] in original image coordinates
   let clickSquareSize = 110;   // Default square box size in original pixels for 1-click
 
@@ -46,6 +46,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const previewFilesize = document.getElementById('preview-filesize');
   const btnRemoveImage = document.getElementById('btn-remove-image');
 
+  // Universal Preprocessing Controls
+  const checkUseSplit = document.getElementById('check-use-split');
+  const checkUseRoi = document.getElementById('check-use-roi');
+
   // Model Selector
   const btnModelYolo = document.getElementById('btn-model-yolo');
   const btnModelLoca = document.getElementById('btn-model-loca');
@@ -58,25 +62,30 @@ document.addEventListener('DOMContentLoaded', () => {
   const imgszSelect = document.getElementById('imgsz-select');
   const confidenceRange = document.getElementById('confidence-range');
   const confidenceVal = document.getElementById('confidence-val');
+  const yoloNmsRange = document.getElementById('yolo-nms-range');
+  const yoloNmsVal = document.getElementById('yolo-nms-val');
   const checkSliced = document.getElementById('check-sliced');
   const checkEnhance = document.getElementById('check-enhance');
 
   // LOCA Parameters
   const radioLocaZero = document.getElementById('radio-loca-zero');
   const radioLocaFew = document.getElementById('radio-loca-few');
+  const checkLocaFixedExemplars = document.getElementById('check-loca-fixed-exemplars');
+  const checkLocaPadSquare = document.getElementById('check-loca-pad-square');
   const locaFewShotHelper = document.getElementById('loca-few-shot-helper');
   const exemplarCountBadge = document.getElementById('exemplar-count-badge');
   const btnClearExemplars = document.getElementById('btn-clear-exemplars');
-  const locaThresholdRange = document.getElementById('loca-threshold-range');
-  const locaThresholdVal = document.getElementById('loca-threshold-val');
+  const locaPeakRatioRange = document.getElementById('loca-peak-ratio-range');
+  const locaPeakRatioVal = document.getElementById('loca-peak-ratio-val');
   const sizeChoiceButtons = document.querySelectorAll('.btn-size-choice');
 
   // Grounding DINO Parameters
   const dinoPromptInput = document.getElementById('dino-prompt-input');
   const dinoBoxThreshRange = document.getElementById('dino-box-thresh-range');
   const dinoBoxThreshVal = document.getElementById('dino-box-thresh-val');
-  const dinoTextThreshRange = document.getElementById('dino-text-thresh-range');
-  const dinoTextThreshVal = document.getElementById('dino-text-thresh-val');
+  const dinoNmsThreshRange = document.getElementById('dino-nms-thresh-range');
+  const dinoNmsThreshVal = document.getElementById('dino-nms-thresh-val');
+  const checkDinoFilterLarge = document.getElementById('check-dino-filter-large');
   const promptPillButtons = document.querySelectorAll('.btn-prompt-pill');
 
   // Detect Action
@@ -98,484 +107,256 @@ document.addEventListener('DOMContentLoaded', () => {
   const mainDrawCanvas = document.getElementById('main-draw-canvas');
 
   const statsWrapper = document.getElementById('stats-wrapper');
-  const resultActions = document.getElementById('result-actions');
-  const statLabelCount = document.getElementById('stat-label-count');
   const statCount = document.getElementById('stat-count');
+  const statLabelCount = document.getElementById('stat-label-count');
   const statTime = document.getElementById('stat-time');
   const statRes = document.getElementById('stat-res');
-  const statLabelConf = document.getElementById('stat-label-conf');
   const statConf = document.getElementById('stat-conf');
+  const statLabelConf = document.getElementById('stat-label-conf');
 
-  const tableTitleText = document.getElementById('table-title-text');
-  const tableCount = document.getElementById('table-count');
-  const thScore = document.getElementById('th-score');
-  const thCoords = document.getElementById('th-coords');
-  const detectionsTbody = document.getElementById('detections-tbody');
+  const resultActions = document.getElementById('result-actions');
   const btnViewAnnotated = document.getElementById('btn-view-annotated');
   const btnViewOriginal = document.getElementById('btn-view-original');
   const btnDownload = document.getElementById('btn-download');
   const btnFullscreen = document.getElementById('btn-fullscreen');
 
-  // Webcam Elements
+  const tableCount = document.getElementById('table-count');
+  const tableTitleText = document.getElementById('table-title-text');
+  const thScore = document.getElementById('th-score');
+  const thCoords = document.getElementById('th-coords');
+  const detectionsTbody = document.getElementById('detections-tbody');
+
+  // Modal & Toast
+  const modalZoom = document.getElementById('modal-zoom');
+  const modalImg = document.getElementById('modal-img');
+  const btnCloseModal = document.getElementById('btn-close-modal');
+  const modalBackdrop = document.getElementById('modal-backdrop');
+  const toastContainer = document.getElementById('toast-container');
+
+  // Camera Elements
   const cameraFeed = document.getElementById('camera-feed');
   const cameraOverlay = document.getElementById('camera-overlay');
   const cameraErrorText = document.getElementById('camera-error-text');
   const btnSnapCamera = document.getElementById('btn-snap-camera');
   const btnToggleCamera = document.getElementById('btn-toggle-camera');
-
-  // Sample
   const btnLoadSample = document.getElementById('btn-load-sample');
-
-  // Modal
-  const modalZoom = document.getElementById('modal-zoom');
-  const modalImg = document.getElementById('modal-img');
-  const btnCloseModal = document.getElementById('btn-close-modal');
-  const modalBackdrop = document.getElementById('modal-backdrop');
-
-  // Toast Container
-  const toastContainer = document.getElementById('toast-container');
 
   // ----------------------------------------------------
   // Toast Notifications
   // ----------------------------------------------------
-  function showToast(message, type = 'error', duration = 4000) {
+  function showToast(message, type = 'info', duration = 3500) {
     const toast = document.createElement('div');
-    toast.className = `toast ${type === 'error' ? 'toast-error' : 'toast-success'}`;
+    toast.className = `toast toast-${type}`;
     toast.textContent = message;
     toastContainer.appendChild(toast);
-
     setTimeout(() => {
-      toast.classList.add('toast-fade-out');
-      setTimeout(() => toast.remove(), 300);
+      toast.style.animation = 'toastFadeOut 0.3s forwards ease';
+      setTimeout(() => toast.remove(), 320);
     }, duration);
   }
 
   // ----------------------------------------------------
-  // Health & Initial Setup
+  // Health & Service Check
   // ----------------------------------------------------
   async function checkHealth() {
     try {
       const res = await fetch('/api/health');
+      if (!res.ok) throw new Error('Mất kết nối máy chủ');
       const data = await res.json();
-
+      statusPill.className = 'status-pill status-ready';
+      statusText.textContent = `${data.model} sẵn sàng • ${data.device || 'CPU'}`;
       if (data.max_upload_mb) {
         maxUploadMb = data.max_upload_mb;
         maxUploadBytes = maxUploadMb * 1024 * 1024;
-        if (dropFormatsText) {
-          dropFormatsText.textContent = `Hỗ trợ JPG, PNG, WEBP (Tối đa ${maxUploadMb} MB)`;
-        }
-      }
-
-      if (imgszSelect && data.default_imgsz) {
-        imgszSelect.value = String(data.default_imgsz);
-      }
-
-      if (data.ready) {
-        statusPill.className = 'status-pill status-ready';
-        let readyList = [];
-        if (data.yolo_ready) readyList.push('YOLO11');
-        if (data.loca_ready) readyList.push('LOCA');
-        if (data.dino_ready) readyList.push('Grounding DINO');
-        statusText.textContent = `Mô hình: ${readyList.join(' + ')} (Sẵn sàng)`;
-      } else {
-        statusPill.className = 'status-pill status-error';
-        statusText.textContent = 'Chưa sẵn sàng bộ trọng số';
+        dropFormatsText.textContent = `Hỗ trợ JPG, PNG, WEBP (Tối đa ${maxUploadMb} MB)`;
       }
     } catch (err) {
-      statusPill.className = 'status-pill status-error';
-      statusText.textContent = 'Mất kết nối server';
+      statusPill.className = 'status-pill status-offline';
+      statusText.textContent = 'Không thể kết nối Backend';
     }
+  }
+  checkHealth();
+
+  // ----------------------------------------------------
+  // Slider Value Bindings
+  // ----------------------------------------------------
+  if (confidenceRange && confidenceVal) {
+    confidenceRange.addEventListener('input', e => {
+      const val = parseFloat(e.target.value).toFixed(2);
+      confidenceVal.textContent = `${val} (${Math.round(val * 100)}%)`;
+    });
+  }
+  if (yoloNmsRange && yoloNmsVal) {
+    yoloNmsRange.addEventListener('input', e => {
+      yoloNmsVal.textContent = parseFloat(e.target.value).toFixed(2);
+    });
+  }
+  if (locaPeakRatioRange && locaPeakRatioVal) {
+    locaPeakRatioRange.addEventListener('input', e => {
+      const val = parseFloat(e.target.value).toFixed(2);
+      locaPeakRatioVal.textContent = `${val} (${Math.round(val * 100)}%)`;
+    });
+  }
+  if (dinoBoxThreshRange && dinoBoxThreshVal) {
+    dinoBoxThreshRange.addEventListener('input', e => {
+      const val = parseFloat(e.target.value).toFixed(2);
+      dinoBoxThreshVal.textContent = `${val} (${Math.round(val * 100)}%)`;
+    });
+  }
+  if (dinoNmsThreshRange && dinoNmsThreshVal) {
+    dinoNmsThreshRange.addEventListener('input', e => {
+      dinoNmsThreshVal.textContent = parseFloat(e.target.value).toFixed(2);
+    });
   }
 
   // ----------------------------------------------------
-  // Model & Mode Switching Logic
+  // Prompt Pills for Grounding DINO
   // ----------------------------------------------------
-  function setModel(model) {
-    currentModel = model;
-
-    [btnModelYolo, btnModelLoca, btnModelDino].forEach(b => b.classList.remove('active'));
-    [yoloConfigGroup, locaConfigGroup, dinoConfigGroup].forEach(g => g.classList.add('hidden'));
-
-    if (model === 'yolo11') {
-      btnModelYolo.classList.add('active');
-      yoloConfigGroup.classList.remove('hidden');
-      detectBtnText.textContent = 'Nhận diện & Đếm bằng YOLO11';
-    } else if (model === 'loca') {
-      btnModelLoca.classList.add('active');
-      locaConfigGroup.classList.remove('hidden');
-      detectBtnText.textContent = 'Đếm mật độ bằng LOCA';
-    } else if (model === 'grounding_dino') {
-      btnModelDino.classList.add('active');
-      dinoConfigGroup.classList.remove('hidden');
-      detectBtnText.textContent = 'Nhận diện & Đếm bằng Grounding DINO';
-    }
-
-    updateLocaModeUI();
-  }
-
-  btnModelYolo.addEventListener('click', () => setModel('yolo11'));
-  btnModelLoca.addEventListener('click', () => setModel('loca'));
-  btnModelDino.addEventListener('click', () => setModel('grounding_dino'));
-
-  // Grounding DINO Quick Prompt Pills
   promptPillButtons.forEach(btn => {
     btn.addEventListener('click', () => {
       promptPillButtons.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      dinoPromptInput.value = btn.dataset.prompt;
+      const prompt = btn.dataset.prompt;
+      if (dinoPromptInput) {
+        dinoPromptInput.value = prompt;
+      }
     });
   });
 
-  dinoBoxThreshRange.addEventListener('input', e => {
-    const val = parseFloat(e.target.value).toFixed(2);
-    const pct = Math.round(parseFloat(e.target.value) * 100);
-    dinoBoxThreshVal.textContent = `${val} (${pct}%)`;
-  });
+  // ----------------------------------------------------
+  // Switch Model Tabs
+  // ----------------------------------------------------
+  function switchModel(model) {
+    currentModel = model;
+    btnModelYolo.classList.toggle('active', model === 'yolo11');
+    btnModelLoca.classList.toggle('active', model === 'loca');
+    btnModelDino.classList.toggle('active', model === 'grounding_dino');
 
-  dinoTextThreshRange.addEventListener('input', e => {
-    const val = parseFloat(e.target.value).toFixed(2);
-    const pct = Math.round(parseFloat(e.target.value) * 100);
-    dinoTextThreshVal.textContent = `${val} (${pct}%)`;
-  });
+    yoloConfigGroup.classList.toggle('hidden', model !== 'yolo11');
+    locaConfigGroup.classList.toggle('hidden', model !== 'loca');
+    dinoConfigGroup.classList.toggle('hidden', model !== 'grounding_dino');
 
-  function updateLocaModeUI() {
-    if (currentModel === 'loca') {
-      if (radioLocaFew.checked) {
-        locaMode = 'few_shot';
-        locaFewShotHelper.classList.remove('hidden');
-      } else {
-        locaMode = 'zero_shot';
-        locaFewShotHelper.classList.add('hidden');
-      }
+    if (model === 'loca') {
+      detectBtnText.textContent = 'Đếm mật độ bằng LOCA';
+      updateWorkspaceBanner();
+    } else if (model === 'grounding_dino') {
+      detectBtnText.textContent = 'Nhận diện & Đếm bằng Grounding DINO';
+      workspaceBanner.classList.add('hidden');
+    } else {
+      detectBtnText.textContent = 'Nhận diện & Đếm bằng YOLO11';
+      workspaceBanner.classList.add('hidden');
     }
-
-    updateWorkspaceBanner();
-    syncMainCanvasSize();
     redrawMainCanvas();
   }
 
-  radioLocaZero.addEventListener('change', updateLocaModeUI);
-  radioLocaFew.addEventListener('change', updateLocaModeUI);
+  btnModelYolo.addEventListener('click', () => switchModel('yolo11'));
+  btnModelLoca.addEventListener('click', () => switchModel('loca'));
+  btnModelDino.addEventListener('click', () => switchModel('grounding_dino'));
 
-  // Square Size Buttons
-  sizeChoiceButtons.forEach(btn => {
-    btn.addEventListener('click', () => {
-      sizeChoiceButtons.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      clickSquareSize = parseInt(btn.dataset.size, 10) || 110;
-      showToast(`Đã chọn cỡ khung vuông: ${clickSquareSize}px`, 'success', 1800);
+  // ----------------------------------------------------
+  // LOCA Mode & Fixed Exemplars
+  // ----------------------------------------------------
+  if (radioLocaFew) {
+    radioLocaFew.addEventListener('change', () => {
+      locaMode = 'few_shot';
+      updateLocaUi();
     });
-  });
+  }
+  if (radioLocaZero) {
+    radioLocaZero.addEventListener('change', () => {
+      locaMode = 'zero_shot';
+      updateLocaUi();
+    });
+  }
+  if (checkLocaFixedExemplars) {
+    checkLocaFixedExemplars.addEventListener('change', updateLocaUi);
+  }
 
-  // ----------------------------------------------------
-  // Workspace Banner Updates
-  // ----------------------------------------------------
+  function updateLocaUi() {
+    const isFixed = checkLocaFixedExemplars && checkLocaFixedExemplars.checked;
+    if (locaMode === 'few_shot' && !isFixed) {
+      locaFewShotHelper.classList.remove('hidden');
+    } else {
+      locaFewShotHelper.classList.add('hidden');
+    }
+    updateWorkspaceBanner();
+    redrawMainCanvas();
+  }
+
   function updateWorkspaceBanner() {
-    if (!currentFile) {
+    if (currentModel !== 'loca' || locaMode !== 'few_shot' || !currentFile) {
       workspaceBanner.classList.add('hidden');
+      return;
+    }
+    const isFixed = checkLocaFixedExemplars && checkLocaFixedExemplars.checked;
+    if (isFixed) {
+      workspaceBanner.classList.remove('hidden');
+      bannerIcon.textContent = '🎯';
+      bannerText.textContent = 'Đang dùng bộ 3 khung mẫu chuẩn cố định (Cả hàng trên & dưới).';
+      btnBannerClear.classList.add('hidden');
       return;
     }
 
     workspaceBanner.classList.remove('hidden');
-
-    if (currentModel === 'loca' && locaMode === 'few_shot') {
-      bannerIcon.textContent = '🎯';
-      bannerText.innerHTML = `<strong>Chế độ Khoanh Mẫu (Few-Shot):</strong> Click vào thùng máy để đặt khung vuông, hoặc kéo chuột để khoanh! (Đã chọn: <strong>${exemplarBoxes.length}/3 mẫu</strong>)`;
-      btnBannerClear.classList.remove('hidden');
-      mainDrawCanvas.classList.remove('drawing-disabled');
-    } else if (currentModel === 'loca') {
-      bannerIcon.textContent = '⚡';
-      bannerText.innerHTML = `<strong>Chế độ Zero-Shot:</strong> LOCA sẽ tự động phát hiện mọi đối tượng lặp lại mà không cần khoanh mẫu.`;
-      btnBannerClear.classList.add('hidden');
-      mainDrawCanvas.classList.add('drawing-disabled');
-    } else if (currentModel === 'grounding_dino') {
-      bannerIcon.textContent = '🏷️';
-      bannerText.innerHTML = `<strong>Chế độ Grounding DINO:</strong> Đếm đối tượng linh hoạt bằng câu chữ mô tả (Prompt). Nhấn nút bên trái để đếm.`;
-      btnBannerClear.classList.add('hidden');
-      mainDrawCanvas.classList.add('drawing-disabled');
-    } else {
-      bannerIcon.textContent = '🔍';
-      bannerText.innerHTML = `<strong>Chế độ YOLO11:</strong> Quét tự động các thùng máy PC và vẽ Bounding Box có độ tự tin cao.`;
-      btnBannerClear.classList.add('hidden');
-      mainDrawCanvas.classList.add('drawing-disabled');
-    }
+    btnBannerClear.classList.remove('hidden');
+    const count = exemplarBoxes.length;
+    bannerIcon.textContent = count >= 3 ? '✅' : '🎯';
+    bannerText.textContent = count >= 3
+      ? `Đã khoanh đủ 3 mẫu đối tượng! Sẵn sàng đếm.`
+      : `Click vào thùng máy để đặt khung vuông mẫu (Đã khoanh: ${count}/3)`;
   }
 
-  function clearAllExemplars() {
-    exemplarBoxes = [];
-    updateExemplarBadge();
-    updateWorkspaceBanner();
-    redrawMainCanvas();
-    showToast('Đã xóa tất cả các khung mẫu.', 'success', 2000);
-  }
-
-  btnClearExemplars.addEventListener('click', clearAllExemplars);
-  btnBannerClear.addEventListener('click', clearAllExemplars);
-
-  function updateExemplarBadge() {
-    exemplarCountBadge.textContent = `${exemplarBoxes.length} / 3 mẫu`;
-    if (exemplarBoxes.length >= 3) {
-      exemplarCountBadge.style.backgroundColor = '#10b981';
-      exemplarCountBadge.style.color = '#fff';
-    } else {
-      exemplarCountBadge.style.backgroundColor = '#f59e0b';
-      exemplarCountBadge.style.color = '#000';
-    }
-  }
-
-  // ----------------------------------------------------
-  // Main Canvas Setup & Drawing
-  // ----------------------------------------------------
-  function syncMainCanvasSize() {
-    const activeImg = imageOriginal.classList.contains('hidden') ? imageAnnotated : imageOriginal;
-    if (!activeImg.complete || !activeImg.naturalWidth) return;
-
-    mainDrawCanvas.width = activeImg.clientWidth;
-    mainDrawCanvas.height = activeImg.clientHeight;
-  }
-
-  window.addEventListener('resize', () => {
-    syncMainCanvasSize();
-    redrawMainCanvas();
-  });
-
-  imageOriginal.addEventListener('load', () => {
-    syncMainCanvasSize();
-    redrawMainCanvas();
-  });
-
-  imageAnnotated.addEventListener('load', () => {
-    syncMainCanvasSize();
-    redrawMainCanvas();
-  });
-
-  function getCanvasPos(e) {
-    const rect = mainDrawCanvas.getBoundingClientRect();
-    return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top
-    };
-  }
-
-  function redrawMainCanvas(currentDragBox = null) {
-    const ctx = mainDrawCanvas.getContext('2d');
-    ctx.clearRect(0, 0, mainDrawCanvas.width, mainDrawCanvas.height);
-
-    if (!imageOriginal.naturalWidth) return;
-    const scaleX = mainDrawCanvas.width / imageOriginal.naturalWidth;
-    const scaleY = mainDrawCanvas.height / imageOriginal.naturalHeight;
-
-    // Draw existing exemplar boxes
-    exemplarBoxes.forEach((box, idx) => {
-      const bx = box[0] * scaleX;
-      const by = box[1] * scaleY;
-      const bw = (box[2] - box[0]) * scaleX;
-      const bh = (box[3] - box[1]) * scaleY;
-
-      // Fill semi-transparent orange
-      ctx.fillStyle = 'rgba(245, 158, 11, 0.22)';
-      ctx.fillRect(bx, by, bw, bh);
-
-      // Border with solid glow
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#f59e0b';
-      ctx.strokeRect(bx, by, bw, bh);
-
-      // Center crosshair mark (+)
-      const cx = bx + bw / 2;
-      const cy = by + bh / 2;
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.moveTo(cx - 8, cy); ctx.lineTo(cx + 8, cy);
-      ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy + 8);
-      ctx.stroke();
-
-      // Corner markers
-      ctx.fillStyle = '#ffffff';
-      const csize = 6;
-      ctx.fillRect(bx - 3, by - 3, csize, csize);
-      ctx.fillRect(bx + bw - 3, by - 3, csize, csize);
-      ctx.fillRect(bx - 3, by + bh - 3, csize, csize);
-      ctx.fillRect(bx + bw - 3, by + bh - 3, csize, csize);
-
-      // Label badge
-      ctx.fillStyle = '#f59e0b';
-      const labelText = `Mẫu #${idx + 1} (${Math.round(box[2] - box[0])}×${Math.round(box[3] - box[1])})`;
-      ctx.font = 'bold 12px sans-serif';
-      const textWidth = ctx.measureText(labelText).width;
-      const labelY = Math.max(0, by - 24);
-      ctx.fillRect(bx, labelY, textWidth + 14, 22);
-
-      ctx.fillStyle = '#000000';
-      ctx.fillText(labelText, bx + 7, labelY + 16);
-    });
-
-    // Draw active drag preview
-    if (currentDragBox) {
-      const rx = Math.min(currentDragBox.x1, currentDragBox.x2);
-      const ry = Math.min(currentDragBox.y1, currentDragBox.y2);
-      const rw = Math.abs(currentDragBox.x2 - currentDragBox.x1);
-      const rh = Math.abs(currentDragBox.y2 - currentDragBox.y1);
-
-      ctx.fillStyle = 'rgba(56, 189, 248, 0.3)';
-      ctx.fillRect(rx, ry, rw, rh);
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#38bdf8';
-      ctx.setLineDash([5, 5]);
-      ctx.strokeRect(rx, ry, rw, rh);
-      ctx.setLineDash([]);
-    }
-  }
-
-  // ----------------------------------------------------
-  // Mouse Events: 1-Click Square & Freeform Drag
-  // ----------------------------------------------------
-  mainDrawCanvas.addEventListener('mousedown', e => {
-    if (currentModel !== 'loca' || locaMode !== 'few_shot') return;
-
-    if (exemplarBoxes.length >= 3) {
-      showToast('Đã chọn tối đa 3 mẫu đối tượng. Hãy bấm "Xóa tất cả" nếu muốn chọn lại.', 'error', 3000);
-      return;
-    }
-
-    const pos = getCanvasPos(e);
-    isMouseDown = true;
-    dragStartX = pos.x;
-    dragStartY = pos.y;
-    mouseDownTimestamp = Date.now();
-  });
-
-  mainDrawCanvas.addEventListener('mousemove', e => {
-    if (!isMouseDown) return;
-    const pos = getCanvasPos(e);
-    redrawMainCanvas({
-      x1: dragStartX,
-      y1: dragStartY,
-      x2: pos.x,
-      y2: pos.y
-    });
-  });
-
-  function finishCanvasInteraction(e) {
-    if (!isMouseDown) return;
-    isMouseDown = false;
-
-    const pos = getCanvasPos(e);
-    const timeDiff = Date.now() - mouseDownTimestamp;
-    const dist = Math.hypot(pos.x - dragStartX, pos.y - dragStartY);
-
-    const scaleX = imageOriginal.naturalWidth / mainDrawCanvas.width;
-    const scaleY = imageOriginal.naturalHeight / mainDrawCanvas.height;
-
-    // CASE 1: 1-CLICK SQUARE CREATION (Super easy for user!)
-    if (timeDiff < 300 && dist < 10) {
-      const clickOrigX = pos.x * scaleX;
-      const clickOrigY = pos.y * scaleY;
-      const halfSize = clickSquareSize / 2;
-
-      const x1 = Math.max(0, Math.round(clickOrigX - halfSize));
-      const y1 = Math.max(0, Math.round(clickOrigY - halfSize));
-      const x2 = Math.min(imageOriginal.naturalWidth, Math.round(clickOrigX + halfSize));
-      const y2 = Math.min(imageOriginal.naturalHeight, Math.round(clickOrigY + halfSize));
-
-      exemplarBoxes.push([x1, y1, x2, y2]);
+  if (btnBannerClear) {
+    btnBannerClear.addEventListener('click', () => {
+      exemplarBoxes = [];
       updateExemplarBadge();
       updateWorkspaceBanner();
       redrawMainCanvas();
-      showToast(`Đã tạo khung vuông Mẫu #${exemplarBoxes.length} (${clickSquareSize}×${clickSquareSize}px)!`, 'success', 2200);
-      return;
-    }
-
-    // CASE 2: DRAG BOX CREATION
-    const x1 = Math.round(Math.min(dragStartX, pos.x) * scaleX);
-    const y1 = Math.round(Math.min(dragStartY, pos.y) * scaleY);
-    const x2 = Math.round(Math.max(dragStartX, pos.x) * scaleX);
-    const y2 = Math.round(Math.max(dragStartY, pos.y) * scaleY);
-
-    if (x2 - x1 < 15 || y2 - y1 < 15) {
-      redrawMainCanvas();
-      return;
-    }
-
-    exemplarBoxes.push([x1, y1, x2, y2]);
-    updateExemplarBadge();
-    updateWorkspaceBanner();
-    redrawMainCanvas();
-    showToast(`Đã khoanh Mẫu #${exemplarBoxes.length} thành công!`, 'success', 2200);
+    });
   }
 
-  mainDrawCanvas.addEventListener('mouseup', finishCanvasInteraction);
-  mainDrawCanvas.addEventListener('mouseleave', () => {
-    if (isMouseDown) {
-      isMouseDown = false;
-      redrawMainCanvas();
+  function updateExemplarBadge() {
+    if (exemplarCountBadge) {
+      exemplarCountBadge.textContent = `${exemplarBoxes.length} / 3 mẫu`;
     }
-  });
+  }
+
+  if (btnClearExemplars) {
+    btnClearExemplars.addEventListener('click', () => {
+      exemplarBoxes = [];
+      updateExemplarBadge();
+      updateWorkspaceBanner();
+      redrawMainCanvas();
+    });
+  }
 
   // ----------------------------------------------------
-  // Sliders Bindings
+  // Input Tabs (Upload / Camera / Sample)
   // ----------------------------------------------------
-  confidenceRange.addEventListener('input', e => {
-    const val = parseFloat(e.target.value).toFixed(2);
-    const pct = Math.round(parseFloat(e.target.value) * 100);
-    confidenceVal.textContent = `${val} (${pct}%)`;
-  });
-
-  locaThresholdRange.addEventListener('input', e => {
-    const val = parseFloat(e.target.value).toFixed(2);
-    const pct = Math.round(parseFloat(e.target.value) * 100);
-    locaThresholdVal.textContent = `${val} (${pct}%)`;
-  });
-
-  // ----------------------------------------------------
-  // Tabs
-  // ----------------------------------------------------
-  function switchTab(target) {
-    [tabUpload, tabWebcam, tabSample].forEach(tab => tab.classList.remove('active'));
-    [uploadSection, webcamSection, sampleSection].forEach(sec => sec.classList.add('hidden'));
-
-    if (target === 'upload') {
-      tabUpload.classList.add('active');
-      uploadSection.classList.remove('hidden');
-      stopWebcam();
-    } else if (target === 'webcam') {
-      tabWebcam.classList.add('active');
-      webcamSection.classList.remove('hidden');
-      startWebcam();
-    } else if (target === 'sample') {
-      tabSample.classList.add('active');
-      sampleSection.classList.remove('hidden');
+  function activateTab(activeBtn, activeSection) {
+    [tabUpload, tabWebcam, tabSample].forEach(t => t.classList.remove('active'));
+    [uploadSection, webcamSection, sampleSection].forEach(s => s.classList.add('hidden'));
+    activeBtn.classList.add('active');
+    activeSection.classList.remove('hidden');
+    if (activeBtn !== tabWebcam && mediaStream) {
       stopWebcam();
     }
   }
 
-  tabUpload.addEventListener('click', () => switchTab('upload'));
-  tabWebcam.addEventListener('click', () => switchTab('webcam'));
-  tabSample.addEventListener('click', () => switchTab('sample'));
+  tabUpload.addEventListener('click', () => activateTab(tabUpload, uploadSection));
+  tabWebcam.addEventListener('click', () => {
+    activateTab(tabWebcam, webcamSection);
+    startWebcam();
+  });
+  tabSample.addEventListener('click', () => activateTab(tabSample, sampleSection));
 
   // ----------------------------------------------------
-  // File Selection
+  // File Loading & Previews
   // ----------------------------------------------------
-  function formatBytes(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  }
-
   function handleFileSelect(file) {
     if (!file) return;
-
-    const validTypes = ['image/jpeg', 'image/png', 'image/webp'];
-    if (!validTypes.includes(file.type) && !/\.(jpe?g|png|webp)$/i.test(file.name)) {
-      showToast('Định dạng ảnh không hỗ trợ. Vui lòng chọn ảnh JPEG, PNG hoặc WEBP.', 'error');
-      return;
-    }
-
     if (file.size > maxUploadBytes) {
-      showToast(`Ảnh vượt quá giới hạn cho phép (${maxUploadMb} MB).`, 'error');
+      showToast(`Kích thước file (${(file.size / 1024 / 1024).toFixed(1)} MB) vượt quá giới hạn ${maxUploadMb} MB.`, 'error');
       return;
     }
 
@@ -585,14 +366,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     currentPreviewUrl = URL.createObjectURL(file);
 
-    // Update left preview box
     previewImage.src = currentPreviewUrl;
-    previewFilename.textContent = file.name;
-    previewFilesize.textContent = formatBytes(file.size);
+    previewFilename.textContent = file.name || 'image.jpg';
+    previewFilesize.textContent = `${(file.size / 1024).toFixed(0)} KB`;
     previewBox.classList.remove('hidden');
     btnDetect.disabled = false;
 
-    // Immediately display image in main right panel
     emptyState.classList.add('hidden');
     resultContent.classList.remove('hidden');
     statsWrapper.classList.add('hidden');
@@ -602,7 +381,6 @@ document.addEventListener('DOMContentLoaded', () => {
     imageOriginal.classList.remove('hidden');
     imageAnnotated.classList.add('hidden');
 
-    // Reset exemplars on new image
     exemplarBoxes = [];
     updateExemplarBadge();
     updateWorkspaceBanner();
@@ -633,95 +411,31 @@ document.addEventListener('DOMContentLoaded', () => {
   btnRemoveImage.addEventListener('click', clearSelectedFile);
 
   // Drag & drop
-  ['dragenter', 'dragover'].forEach(eventName => {
-    dropZone.addEventListener(eventName, e => {
+  ['dragenter', 'dragover'].forEach(name => {
+    dropZone.addEventListener(name, e => {
       e.preventDefault();
-      e.stopPropagation();
       dropZone.classList.add('dragover');
     });
   });
-
-  ['dragleave', 'drop'].forEach(eventName => {
-    dropZone.addEventListener(eventName, e => {
+  ['dragleave', 'drop'].forEach(name => {
+    dropZone.addEventListener(name, e => {
       e.preventDefault();
-      e.stopPropagation();
       dropZone.classList.remove('dragover');
     });
   });
-
   dropZone.addEventListener('drop', e => {
     const dt = e.dataTransfer;
     if (dt && dt.files && dt.files.length > 0) {
       handleFileSelect(dt.files[0]);
     }
   });
-
   fileInput.addEventListener('change', e => {
     if (e.target.files && e.target.files.length > 0) {
       handleFileSelect(e.target.files[0]);
     }
   });
 
-  // ----------------------------------------------------
-  // Webcam Handling
-  // ----------------------------------------------------
-  async function startWebcam() {
-    if (mediaStream) return;
-    try {
-      cameraOverlay.classList.add('hidden');
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'environment' }
-      });
-      cameraFeed.srcObject = mediaStream;
-      btnToggleCamera.textContent = 'Dừng camera';
-    } catch (err) {
-      cameraOverlay.classList.remove('hidden');
-      cameraErrorText.textContent = 'Không thể mở camera thiết bị: ' + (err.message || 'Bị chặn quyền truy cập');
-      showToast('Không thể kết nối camera.', 'error');
-    }
-  }
-
-  function stopWebcam() {
-    if (mediaStream) {
-      mediaStream.getTracks().forEach(track => track.stop());
-      mediaStream = null;
-      cameraFeed.srcObject = null;
-      btnToggleCamera.textContent = 'Bật camera';
-    }
-  }
-
-  btnToggleCamera.addEventListener('click', () => {
-    if (mediaStream) {
-      stopWebcam();
-    } else {
-      startWebcam();
-    }
-  });
-
-  btnSnapCamera.addEventListener('click', () => {
-    if (!cameraFeed.videoWidth) {
-      showToast('Camera chưa sẵn sàng để chụp.', 'error');
-      return;
-    }
-
-    const canvas = document.createElement('canvas');
-    canvas.width = cameraFeed.videoWidth;
-    canvas.height = cameraFeed.videoHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(cameraFeed, 0, 0, canvas.width, canvas.height);
-
-    canvas.toBlob(blob => {
-      if (blob) {
-        const file = new File([blob], `camera_${Date.now()}.jpg`, { type: 'image/jpeg' });
-        handleFileSelect(file);
-        showToast('Đã chụp ảnh từ camera thành công!', 'success');
-      }
-    }, 'image/jpeg', 0.92);
-  });
-
-  // ----------------------------------------------------
-  // Sample Image
-  // ----------------------------------------------------
+  // Sample image
   btnLoadSample.addEventListener('click', async () => {
     try {
       const res = await fetch('/static/sample.jpg');
@@ -729,48 +443,139 @@ document.addEventListener('DOMContentLoaded', () => {
       const blob = await res.blob();
       const sampleFile = new File([blob], 'sample_desktop_case.jpg', { type: 'image/jpeg' });
       handleFileSelect(sampleFile);
-      showToast('Đã nạp ảnh mẫu kiểm thử!', 'success');
+      showToast('Đã nạp ảnh mẫu kiểm thử kệ PC!', 'success');
     } catch (err) {
       showToast('Lỗi khi nạp ảnh mẫu.', 'error');
     }
   });
 
   // ----------------------------------------------------
-  // Detection Execution
+  // Canvas Sizing & Drawing for Exemplars
+  // ----------------------------------------------------
+  function syncMainCanvasSize() {
+    if (!imageOriginal.naturalWidth) return;
+    mainDrawCanvas.width = imageOriginal.clientWidth;
+    mainDrawCanvas.height = imageOriginal.clientHeight;
+  }
+  window.addEventListener('resize', () => {
+    syncMainCanvasSize();
+    redrawMainCanvas();
+  });
+
+  function redrawMainCanvas() {
+    const ctx = mainDrawCanvas.getContext('2d');
+    ctx.clearRect(0, 0, mainDrawCanvas.width, mainDrawCanvas.height);
+
+    if (currentModel !== 'loca' || locaMode !== 'few_shot' || !imageOriginal.naturalWidth) return;
+    const isFixed = checkLocaFixedExemplars && checkLocaFixedExemplars.checked;
+    if (isFixed) return; // Do not draw manual boxes when fixed preset is on
+
+    const scaleX = mainDrawCanvas.width / imageOriginal.naturalWidth;
+    const scaleY = mainDrawCanvas.height / imageOriginal.naturalHeight;
+
+    exemplarBoxes.forEach((box, i) => {
+      const x1 = box[0] * scaleX;
+      const y1 = box[1] * scaleY;
+      const x2 = box[2] * scaleX;
+      const y2 = box[3] * scaleY;
+
+      ctx.strokeStyle = '#ff9900';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+      ctx.fillStyle = '#ff9900';
+      ctx.fillRect(x1, Math.max(0, y1 - 22), 65, 22);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.fillText(`Mẫu #${i + 1}`, x1 + 5, Math.max(15, y1 - 6));
+    });
+  }
+
+  mainDrawCanvas.addEventListener('click', e => {
+    if (currentModel !== 'loca' || locaMode !== 'few_shot') return;
+    if (checkLocaFixedExemplars && checkLocaFixedExemplars.checked) return;
+    if (exemplarBoxes.length >= 3) {
+      showToast('Đã đủ 3 mẫu. Bấm "Xóa mẫu" nếu bạn muốn khoanh lại.', 'info');
+      return;
+    }
+
+    const rect = mainDrawCanvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+
+    const scaleX = imageOriginal.naturalWidth / mainDrawCanvas.width;
+    const scaleY = imageOriginal.naturalHeight / mainDrawCanvas.height;
+
+    const origClickX = clickX * scaleX;
+    const origClickY = clickY * scaleY;
+
+    const half = clickSquareSize / 2;
+    const x1 = Math.max(0, origClickX - half);
+    const y1 = Math.max(0, origClickY - half);
+    const x2 = Math.min(imageOriginal.naturalWidth, origClickX + half);
+    const y2 = Math.min(imageOriginal.naturalHeight, origClickY + half);
+
+    exemplarBoxes.push([Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2)]);
+    updateExemplarBadge();
+    updateWorkspaceBanner();
+    redrawMainCanvas();
+    showToast(`Đã thêm mẫu #${exemplarBoxes.length}!`, 'success');
+  });
+
+  // ----------------------------------------------------
+  // Perform Detection (Inference Request)
   // ----------------------------------------------------
   async function performDetection() {
     if (!currentFile || isProcessing) return;
 
-    if (currentModel === 'loca' && locaMode === 'few_shot' && exemplarBoxes.length === 0) {
-      showToast('Vui lòng Click hoặc Kéo chuột trên ảnh để khoanh ít nhất 1 thùng máy làm mẫu!', 'error', 4500);
+    const isFixed = checkLocaFixedExemplars && checkLocaFixedExemplars.checked;
+    if (currentModel === 'loca' && locaMode === 'few_shot' && !isFixed && exemplarBoxes.length === 0) {
+      showToast('Vui lòng Click trên ảnh để chọn ít nhất 1 mẫu, hoặc bật "Dùng 3 khung mẫu chuẩn cố định"!', 'error', 4500);
       return;
     }
 
     isProcessing = true;
     btnDetect.disabled = true;
     detectSpinner.classList.remove('hidden');
+
     if (currentModel === 'loca') {
-      detectBtnText.textContent = 'LOCA đang tính mật độ...';
+      detectBtnText.textContent = 'LOCA đang tích phân mật độ...';
     } else if (currentModel === 'grounding_dino') {
-      detectBtnText.textContent = 'Grounding DINO đang phân tích...';
+      detectBtnText.textContent = 'Grounding DINO đang nhận diện...';
     } else {
-      detectBtnText.textContent = 'YOLO đang quét nhận diện...';
+      detectBtnText.textContent = 'YOLO11 đang quét nhận diện...';
     }
 
     const formData = new FormData();
     formData.append('image', currentFile, currentFile.name || 'image.jpg');
     formData.append('model_type', currentModel);
 
+    // Universal shelf pre-processing
+    if (checkUseSplit) formData.append('use_split', checkUseSplit.checked ? 'true' : 'false');
+    if (checkUseRoi) formData.append('use_roi', checkUseRoi.checked ? 'true' : 'false');
+
     if (currentModel === 'loca') {
       formData.append('loca_mode', locaMode);
-      formData.append('threshold_rel', locaThresholdRange.value);
+      if (checkLocaFixedExemplars) {
+        formData.append('use_fixed_exemplars', checkLocaFixedExemplars.checked ? 'true' : 'false');
+      }
+      if (checkLocaPadSquare) {
+        formData.append('pad_square', checkLocaPadSquare.checked ? 'true' : 'false');
+      }
+      if (locaPeakRatioRange) {
+        formData.append('peak_min_relative', locaPeakRatioRange.value);
+      }
       formData.append('exemplars', JSON.stringify(exemplarBoxes));
     } else if (currentModel === 'grounding_dino') {
-      formData.append('prompt', dinoPromptInput.value || 'pc case. computer tower.');
-      formData.append('box_threshold', dinoBoxThreshRange.value);
-      formData.append('text_threshold', dinoTextThreshRange.value);
+      formData.append('prompt', dinoPromptInput ? dinoPromptInput.value : 'pc case.');
+      if (dinoBoxThreshRange) formData.append('box_threshold', dinoBoxThreshRange.value);
+      if (dinoNmsThreshRange) formData.append('nms_threshold', dinoNmsThreshRange.value);
+      if (checkDinoFilterLarge) {
+        formData.append('filter_large_boxes', checkDinoFilterLarge.checked ? 'true' : 'false');
+      }
     } else {
-      formData.append('confidence', confidenceRange.value);
+      if (confidenceRange) formData.append('confidence', confidenceRange.value);
+      if (yoloNmsRange) formData.append('nms_iou', yoloNmsRange.value);
       if (imgszSelect) formData.append('imgsz', imgszSelect.value);
       if (checkSliced) formData.append('sliced', checkSliced.checked ? 'true' : 'false');
       if (checkEnhance) formData.append('enhance', checkEnhance.checked ? 'true' : 'false');
@@ -779,21 +584,19 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const res = await fetch('/api/detect', {
         method: 'POST',
-        body: formData
+        body: formData,
       });
 
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Xử lý thất bại.');
-      }
+      if (!res.ok) throw new Error(data.error || 'Xử lý thất bại.');
 
       renderResults(data);
       const countMsg = currentModel === 'loca'
-        ? `Đếm mật độ: ${data.count}`
+        ? `Đếm mật độ: ${data.count} (Tổng: ${data.raw_count})`
         : `Tìm thấy: ${data.count} đối tượng`;
       showToast(`Hoàn tất (${data.model})! ${countMsg}.`, 'success');
     } catch (err) {
-      showToast(err.message || 'Lỗi kết nối tới máy chủ.', 'error');
+      showToast(err.message || 'Lỗi khi gửi yêu cầu tới máy chủ.', 'error');
     } finally {
       isProcessing = false;
       btnDetect.disabled = false;
@@ -819,23 +622,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     statCount.textContent = data.count;
     statTime.textContent = `${data.inference_ms} ms`;
-    statRes.textContent = `${data.width} × ${data.height}`;
+    statRes.textContent = `${data.device || 'CPU'} • ${data.width}×${data.height}`;
 
     if (data.model_type === 'loca') {
       statLabelCount.textContent = 'Số lượng (Mật độ)';
-      statLabelConf.textContent = 'Số đỉnh cực đại (Peaks)';
-      statConf.textContent = `${data.peaks_count || 0}`;
+      statLabelConf.textContent = 'Tổng mật độ thực';
+      statConf.textContent = `${data.raw_count}`;
       btnViewAnnotated.textContent = 'Bản đồ nhiệt LOCA';
-      tableTitleText.textContent = 'Vị trí các đỉnh cực đại (Density Peaks)';
+      tableTitleText.textContent = 'Vị trí các đỉnh mật độ (Peaks)';
       thScore.textContent = 'Điểm mật độ';
-      thCoords.textContent = 'Tọa độ tâm đỉnh [x, y]';
+      thCoords.textContent = 'Tọa độ [x, y]';
     } else if (data.model_type === 'grounding_dino') {
-      statLabelCount.textContent = 'Số lượng đối tượng';
+      statLabelCount.textContent = 'Số lượng Case';
       statLabelConf.textContent = 'Độ tin cậy TB';
       btnViewAnnotated.textContent = 'Ảnh nhận diện Grounding DINO';
-      tableTitleText.textContent = `Chi tiết đối tượng (${data.prompt || 'Prompt'})`;
-      thScore.textContent = 'Độ khớp (Score)';
-      thCoords.textContent = 'Tọa độ Bounding Box [x1, y1, x2, y2]';
+      tableTitleText.textContent = `Chi tiết đối tượng (${data.prompt})`;
+      thScore.textContent = 'Score';
+      thCoords.textContent = 'Tọa độ [x1, y1, x2, y2]';
 
       let avgConf = 0;
       if (data.detections && data.detections.length > 0) {
@@ -849,7 +652,7 @@ document.addEventListener('DOMContentLoaded', () => {
       btnViewAnnotated.textContent = 'Ảnh nhận diện Bounding Box';
       tableTitleText.textContent = 'Chi tiết các đối tượng phát hiện';
       thScore.textContent = 'Độ tin cậy';
-      thCoords.textContent = 'Tọa độ Bounding Box [x1, y1, x2, y2]';
+      thCoords.textContent = 'Tọa độ [x1, y1, x2, y2]';
 
       let avgConf = 0;
       if (data.detections && data.detections.length > 0) {
@@ -861,148 +664,67 @@ document.addEventListener('DOMContentLoaded', () => {
 
     annotatedDataUrl = data.image;
     imageAnnotated.src = annotatedDataUrl;
-    imageOriginal.src = currentPreviewUrl;
+    imageAnnotated.classList.remove('hidden');
+    imageOriginal.classList.add('hidden');
+    btnViewAnnotated.classList.add('active');
+    btnViewOriginal.classList.remove('active');
 
-    setViewMode('annotated');
-
-    // Populate Detections Table
-    tableCount.textContent = data.model_type === 'loca' ? (data.peaks_count || 0) : data.count;
+    // Populate detections table
+    tableCount.textContent = data.detections ? data.detections.length : 0;
     detectionsTbody.innerHTML = '';
-
-    if (!data.detections || data.detections.length === 0) {
-      const row = document.createElement('tr');
-      const cell = document.createElement('td');
-      cell.colSpan = 4;
-      cell.textContent = data.model_type === 'loca'
-        ? 'Không tìm thấy đỉnh mật độ nào vượt ngưỡng. Thử giảm ngưỡng độ nhạy đỉnh.'
-        : 'Không có case nào vượt qua ngưỡng tin cậy này. Thử kéo giảm ngưỡng.';
-      cell.className = 'text-dim';
-      row.appendChild(cell);
-      detectionsTbody.appendChild(row);
-      return;
-    }
-
-    data.detections.forEach((item, index) => {
-      const row = document.createElement('tr');
-
-      // Col 1: Index
-      const tdIdx = document.createElement('td');
-      tdIdx.textContent = index + 1;
-      row.appendChild(tdIdx);
-
-      // Col 2: Class/Badge
-      const tdClass = document.createElement('td');
-      const badge = document.createElement('span');
-      badge.className = 'badge-class';
-      if (data.model_type === 'loca') {
-        badge.textContent = `Peak #${index + 1}`;
-        badge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
-        badge.style.color = '#fbbf24';
-      } else {
-        badge.textContent = item.class_name || 'pc_case';
-      }
-      tdClass.appendChild(badge);
-      row.appendChild(tdClass);
-
-      // Col 3: Confidence / Score
-      const tdConf = document.createElement('td');
-      if (data.model_type === 'loca') {
-        tdConf.textContent = Number(item.confidence).toFixed(4);
-      } else {
-        const confPct = Math.round(item.confidence * 1000) / 10;
-        const confPill = document.createElement('div');
-        confPill.className = 'conf-pill';
-        const confText = document.createElement('span');
-        confText.textContent = `${confPct}%`;
-        const confBar = document.createElement('div');
-        confBar.className = 'conf-bar';
-        const confFill = document.createElement('span');
-        confFill.className = 'conf-fill';
-        confFill.style.width = `${confPct}%`;
-        confBar.appendChild(confFill);
-        confPill.appendChild(confText);
-        confPill.appendChild(confBar);
-        tdConf.appendChild(confPill);
-      }
-      row.appendChild(tdConf);
-
-      // Col 4: Coordinates
-      const tdCoords = document.createElement('td');
-      tdCoords.className = 'coords-cell';
-      if (data.model_type === 'loca' && data.peaks && data.peaks[index]) {
-        const p = data.peaks[index];
-        tdCoords.textContent = `x = ${p.x}, y = ${p.y}`;
-      } else {
-        const [x1, y1, x2, y2] = item.xyxy.map(Math.round);
-        tdCoords.textContent = `[${x1}, ${y1}, ${x2}, ${y2}] (${x2 - x1}×${y2 - y1} px)`;
-      }
-      row.appendChild(tdCoords);
-
-      detectionsTbody.appendChild(row);
-    });
-  }
-
-  // ----------------------------------------------------
-  // View Toggle (Annotated vs Original)
-  // ----------------------------------------------------
-  function setViewMode(mode) {
-    if (mode === 'annotated') {
-      btnViewAnnotated.classList.add('active');
-      btnViewOriginal.classList.remove('active');
-      imageAnnotated.classList.remove('hidden');
-      imageOriginal.classList.add('hidden');
-      mainDrawCanvas.classList.add('hidden'); // hide drawing overlay on annotated result
+    if (data.detections && data.detections.length > 0) {
+      data.detections.forEach((d, idx) => {
+        const tr = document.createElement('tr');
+        const coords = d.xyxy ? d.xyxy.map(c => Math.round(c)).join(', ') : '';
+        const score = typeof d.confidence === 'number' ? (d.confidence > 1 ? d.confidence.toFixed(2) : `${(d.confidence * 100).toFixed(1)}%`) : '-';
+        tr.innerHTML = `
+          <td>${idx + 1}</td>
+          <td><strong>${d.class_name || 'pc_case'}</strong></td>
+          <td>${score}</td>
+          <td><code>[${coords}]</code></td>
+        `;
+        detectionsTbody.appendChild(tr);
+      });
     } else {
-      btnViewOriginal.classList.add('active');
-      btnViewAnnotated.classList.remove('active');
-      imageOriginal.classList.remove('hidden');
-      imageAnnotated.classList.add('hidden');
-      mainDrawCanvas.classList.remove('hidden');
-      syncMainCanvasSize();
-      redrawMainCanvas();
+      detectionsTbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #888;">Không phát hiện đối tượng nào.</td></tr>`;
     }
   }
 
-  btnViewAnnotated.addEventListener('click', () => setViewMode('annotated'));
-  btnViewOriginal.addEventListener('click', () => setViewMode('original'));
-
   // ----------------------------------------------------
-  // Download Result
+  // View Switch & Download
   // ----------------------------------------------------
-  btnDownload.addEventListener('click', () => {
+  btnViewAnnotated.addEventListener('click', () => {
     if (!annotatedDataUrl) return;
-    const a = document.createElement('a');
-    a.href = annotatedDataUrl;
-    const prefix = currentModel === 'loca' ? 'loca_counted' : 'yolo_counted';
-    a.download = `${prefix}_${Date.now()}.jpg`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    showToast('Đang tải ảnh kết quả về máy...', 'success', 2000);
+    imageAnnotated.classList.remove('hidden');
+    imageOriginal.classList.add('hidden');
+    btnViewAnnotated.classList.add('active');
+    btnViewOriginal.classList.remove('active');
   });
 
-  // ----------------------------------------------------
-  // Fullscreen Modal
-  // ----------------------------------------------------
+  btnViewOriginal.addEventListener('click', () => {
+    if (!currentPreviewUrl) return;
+    imageAnnotated.classList.add('hidden');
+    imageOriginal.classList.remove('hidden');
+    btnViewAnnotated.classList.remove('active');
+    btnViewOriginal.classList.add('active');
+  });
+
+  btnDownload.addEventListener('click', () => {
+    const targetUrl = annotatedDataUrl || currentPreviewUrl;
+    if (!targetUrl) return;
+    const a = document.createElement('a');
+    a.href = targetUrl;
+    a.download = `counted_${Date.now()}.jpg`;
+    a.click();
+  });
+
   btnFullscreen.addEventListener('click', () => {
-    const isAnnotated = !imageAnnotated.classList.contains('hidden');
-    modalImg.src = isAnnotated ? annotatedDataUrl : currentPreviewUrl;
+    const targetUrl = annotatedDataUrl || currentPreviewUrl;
+    if (!targetUrl) return;
+    modalImg.src = targetUrl;
     modalZoom.classList.remove('hidden');
   });
 
-  function closeModal() {
-    modalZoom.classList.add('hidden');
-    modalImg.src = '';
-  }
-
-  btnCloseModal.addEventListener('click', closeModal);
-  modalBackdrop.addEventListener('click', closeModal);
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && !modalZoom.classList.contains('hidden')) {
-      closeModal();
-    }
-  });
-
-  // Initialize
-  checkHealth();
+  btnCloseModal.addEventListener('click', () => modalZoom.classList.add('hidden'));
+  modalBackdrop.addEventListener('click', () => modalZoom.classList.add('hidden'));
 });

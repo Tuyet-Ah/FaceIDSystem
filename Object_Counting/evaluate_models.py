@@ -157,12 +157,12 @@ class BenchmarkRunner:
                 detector.nms_iou = 0.50
                 detector.use_split = False
                 detector.use_roi = False
-            else:  # Tuned
-                detector.confidence = 0.35
+            else:  # Tuned (imgsz 960 captures small cases on top shelf with tuned NMS IoU)
+                detector.confidence = 0.40
                 detector.imgsz = 960
-                detector.nms_iou = 0.45
-                detector.use_split = True
-                detector.use_roi = True
+                detector.nms_iou = 0.55
+                detector.use_split = False
+                detector.use_roi = False
 
             dets = detector.detect(image_bgr)
             elapsed = (time.perf_counter() - start) * 1000.0
@@ -334,7 +334,15 @@ def evaluate(
 
     # 1. Write CSV with required columns: file, gt, model, cấu hình, pred (plus time & device)
     fieldnames = ["file", "gt", "model", "cấu hình", "pred", "sai_số", "thời_gian_ms", "thiết_bị"]
-    with open(out_csv_path, "w", newline="", encoding="utf-8-sig") as f:
+    target_csv_path = out_csv_path
+    try:
+        f = open(target_csv_path, "w", newline="", encoding="utf-8-sig")
+    except PermissionError:
+        target_csv_path = out_csv_path.parent / (out_csv_path.stem + f"_{int(time.time())}.csv")
+        print(f"[!] Cảnh báo: File {out_csv_path} đang bị khóa (có thể do đang mở trong Excel). Kết quả được lưu vào: {target_csv_path}")
+        f = open(target_csv_path, "w", newline="", encoding="utf-8-sig")
+
+    with f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in all_rows:
@@ -349,7 +357,7 @@ def evaluate(
                 "thiết_bị": r["device"],
             })
 
-    print(f"\n[+] Đã xuất kết quả chi tiết từng ảnh vào CSV: {out_csv_path}")
+    print(f"\n[+] Đã xuất kết quả chi tiết từng ảnh vào CSV: {target_csv_path}")
 
     # 2. Compute Summary Metrics Table
     summary_table = []

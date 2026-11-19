@@ -141,9 +141,27 @@ def nms_boxes(
     return [int(i[0]) if hasattr(i, "__len__") else int(i) for i in indices]
 
 
+def box_iou_and_iom(b1: List[float], b2: List[float]) -> Tuple[float, float]:
+    """Compute both standard IoU and Intersection-over-Minimum (IoM)."""
+    ix1, iy1 = max(b1[0], b2[0]), max(b1[1], b2[1])
+    ix2, iy2 = min(b1[2], b2[2]), min(b1[3], b2[3])
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0, 0.0
+    area1 = max(0.0, b1[2] - b1[0]) * max(0.0, b1[3] - b1[1])
+    area2 = max(0.0, b2[2] - b2[0]) * max(0.0, b2[3] - b2[1])
+    min_area = min(area1, area2)
+    union = area1 + area2 - inter
+    iou = inter / union if union > 0 else 0.0
+    iom = inter / min_area if min_area > 0 else 0.0
+    return iou, iom
+
+
 def merge_and_nms_detections(
     detections_with_offsets: List[Tuple[Any, int, int]],
     iou_threshold: float = 0.50,
+    iom_threshold: float = 0.45,
 ) -> List[Any]:
     """Remap detections from multiple sub-crops back to original coordinates and apply NMS.
 
@@ -191,8 +209,24 @@ def merge_and_nms_detections(
     if not items:
         return []
 
-    keep_indices = nms_boxes(remapped_boxes, scores, iou_threshold=iou_threshold)
-    return [items[i] for i in keep_indices]
+    # Sort descending by confidence
+    indexed = sorted(enumerate(items), key=lambda x: scores[x[0]], reverse=True)
+    kept_items = []
+    kept_boxes = []
+
+    for idx, item in indexed:
+        box = remapped_boxes[idx]
+        suppressed = False
+        for kbox in kept_boxes:
+            iou, iom = box_iou_and_iom(box, kbox)
+            if iou >= iou_threshold or iom >= iom_threshold:
+                suppressed = True
+                break
+        if not suppressed:
+            kept_boxes.append(box)
+            kept_items.append(item)
+
+    return kept_items
 
 
 def pad_to_square(
