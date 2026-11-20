@@ -15,6 +15,18 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastHealth = null;
   let selectionVersion = 0;
   let lastResultModel = null;
+  let activeInput = 'image';
+  let currentVideoFile = null;
+  let videoPreviewUrl = null;
+  let videoJob = null;
+  let videoSubmitting = false;
+  let videoCancelling = false;
+  let videoPollTimer = null;
+  let videoPollErrors = 0;
+  let maxVideoBytes = 128 * 1024 * 1024;
+  let maxVideoSeconds = 300;
+  let maxVideoSamples = 600;
+  let selectedVideoDuration = null;
 
   let currentModel = 'yolo11'; // Counting models or 'anomalyclip'.
   let locaMode = 'few_shot';   // 'few_shot' or 'zero_shot'
@@ -36,9 +48,37 @@ document.addEventListener('DOMContentLoaded', () => {
   const tabUpload = document.getElementById('tab-upload');
   const tabWebcam = document.getElementById('tab-webcam');
   const tabSample = document.getElementById('tab-sample');
+  const tabVideo = document.getElementById('tab-video');
   const uploadSection = document.getElementById('upload-section');
   const webcamSection = document.getElementById('webcam-section');
   const sampleSection = document.getElementById('sample-section');
+  const videoSection = document.getElementById('video-section');
+  const videoDropZone = document.getElementById('video-drop-zone');
+  const videoFileInput = document.getElementById('video-file-input');
+  const videoFormatsText = document.getElementById('video-formats-text');
+  const videoPreviewBox = document.getElementById('video-preview-box');
+  const videoPreview = document.getElementById('video-preview');
+  const videoFilename = document.getElementById('video-filename');
+  const videoFilesize = document.getElementById('video-filesize');
+  const btnClearVideo = document.getElementById('btn-clear-video');
+  const videoSampleFps = document.getElementById('video-sample-fps');
+  const videoSamplingHelp = document.getElementById('video-sampling-help');
+  const videoModelNote = document.getElementById('video-model-note');
+  const videoResultPanel = document.getElementById('video-result-panel');
+  const videoEmptyState = document.getElementById('video-empty-state');
+  const videoJobProgress = document.getElementById('video-job-progress');
+  const videoJobState = document.getElementById('video-job-state');
+  const videoProgressBar = document.getElementById('video-progress-bar');
+  const videoJobDetail = document.getElementById('video-job-detail');
+  const videoLastMetric = document.getElementById('video-last-metric');
+  const videoJobError = document.getElementById('video-job-error');
+  const btnCancelVideo = document.getElementById('btn-cancel-video');
+  const btnRetryVideoStatus = document.getElementById('btn-retry-video-status');
+  const videoCompletedResult = document.getElementById('video-completed-result');
+  const videoResult = document.getElementById('video-result');
+  const videoResultSummary = document.getElementById('video-result-summary');
+  const videoDownloadLink = document.getElementById('video-download-link');
+  const videoCsvLink = document.getElementById('video-csv-link');
 
   // Upload & Preview
   const dropZone = document.getElementById('drop-zone');
@@ -192,10 +232,18 @@ document.addEventListener('DOMContentLoaded', () => {
         ? `${data.model} sẵn sàng • ${data.device || 'CPU'}`
         : `${data.model || 'Mô hình'} chưa sẵn sàng`;
     }
+    if (data.video) {
+      if (Number.isFinite(data.video.max_upload_mb)) maxVideoBytes = data.video.max_upload_mb * 1024 * 1024;
+      if (Number.isFinite(data.video.max_duration_seconds)) maxVideoSeconds = data.video.max_duration_seconds;
+      if (Number.isFinite(data.video.max_sampled_frames)) maxVideoSamples = data.video.max_sampled_frames;
+      videoFormatsText.textContent = `MP4, MOV, AVI, WEBM · tối đa ${Math.round(maxVideoBytes / 1024 / 1024)} MB và ${Math.round(maxVideoSeconds / 60)} phút`;
+      videoSamplingHelp.textContent = `Chỉ phân tích frame lấy mẫu; tối đa ${maxVideoSamples} frame mỗi video. Video kết quả không có âm thanh. Với AnomalyCLIP trên CPU, bắt đầu bằng 0,5 hoặc 1 frame/giây.`;
+    }
     updateDetectButton();
   }
 
   function actionLabel(model = currentModel) {
+    if (activeInput === 'video') return `Xử lý video bằng ${model === 'anomalyclip' ? 'AnomalyCLIP' : model === 'yolo11' ? 'YOLO11' : model === 'loca' ? 'LOCA' : 'Grounding DINO'}`;
     if (model === 'anomalyclip') return 'Phân tích bất thường bằng AnomalyCLIP';
     if (model === 'loca') return 'Đếm mật độ bằng LOCA';
     if (model === 'grounding_dino') return 'Nhận diện & Đếm bằng Grounding DINO';
@@ -205,7 +253,15 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateDetectButton() {
     const anomalyUnavailable = currentModel === 'anomalyclip'
       && !(lastHealth && lastHealth.anomalyclip && lastHealth.anomalyclip.ready === true);
-    btnDetect.disabled = isProcessing || !currentFile || anomalyUnavailable;
+    if (activeInput === 'video') {
+      const issue = videoUnavailableMessage();
+      videoModelNote.textContent = issue || 'Sẵn sàng xử lý video lấy mẫu. Bạn có thể dừng công việc trong khi đang chạy.';
+      videoModelNote.classList.toggle('is-unavailable', Boolean(issue));
+      btnDetect.disabled = isProcessing || isVideoActive() || !currentVideoFile || Boolean(issue);
+    } else {
+      btnDetect.disabled = isProcessing || isVideoActive() || !currentFile || anomalyUnavailable;
+    }
+    if (!isProcessing && !isVideoActive()) detectBtnText.textContent = actionLabel();
   }
 
   async function checkHealth() {
@@ -284,6 +340,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Switch Model Tabs
   // ----------------------------------------------------
   function switchModel(model) {
+    if (isVideoActive()) {
+      showToast('Video đang được xử lý. Dừng hoặc đợi hoàn tất trước khi đổi mô hình.', 'info');
+      return;
+    }
     if (currentModel !== model) {
       selectionVersion += 1;
       annotatedDataUrl = null;
@@ -405,27 +465,42 @@ document.addEventListener('DOMContentLoaded', () => {
   // Input Tabs (Upload / Camera / Sample)
   // ----------------------------------------------------
   function activateTab(activeBtn, activeSection) {
-    [tabUpload, tabWebcam, tabSample].forEach(t => t.classList.remove('active'));
-    [uploadSection, webcamSection, sampleSection].forEach(s => s.classList.add('hidden'));
+    if (isVideoActive() || isProcessing) {
+      showToast('Đợi xử lý hoàn tất hoặc dừng video trước khi đổi nguồn.', 'info');
+      return false;
+    }
+    [tabUpload, tabWebcam, tabSample, tabVideo].forEach(t => t.classList.remove('active'));
+    [uploadSection, webcamSection, sampleSection, videoSection].forEach(s => s.classList.add('hidden'));
     activeBtn.classList.add('active');
     activeSection.classList.remove('hidden');
     if (activeBtn !== tabWebcam && mediaStream) {
       stopWebcam();
     }
+    activeInput = activeBtn === tabVideo ? 'video' : 'image';
+    const isVideo = activeInput === 'video';
+    videoResultPanel.classList.toggle('hidden', !isVideo);
+    previewBox.classList.toggle('hidden', isVideo || !currentFile);
+    resultContent.classList.toggle('hidden', isVideo || !currentFile);
+    emptyState.classList.toggle('hidden', isVideo || Boolean(currentFile));
+    resultActions.classList.toggle('hidden', isVideo || !annotatedDataUrl);
+    if (!isVideo && videoPreview.pause) videoPreview.pause();
+    if (!isVideo && videoResult.pause) videoResult.pause();
+    updateDetectButton();
+    return true;
   }
 
   tabUpload.addEventListener('click', () => activateTab(tabUpload, uploadSection));
   tabWebcam.addEventListener('click', () => {
-    activateTab(tabWebcam, webcamSection);
-    startWebcam();
+    if (activateTab(tabWebcam, webcamSection)) startWebcam();
   });
   tabSample.addEventListener('click', () => activateTab(tabSample, sampleSection));
+  tabVideo.addEventListener('click', () => activateTab(tabVideo, videoSection));
 
   // ----------------------------------------------------
   // File Loading & Previews
   // ----------------------------------------------------
   function handleFileSelect(file) {
-    if (!file) return;
+    if (!file || isVideoActive()) return;
     if (file.size > maxUploadBytes) {
       showToast(`Kích thước file (${(file.size / 1024 / 1024).toFixed(1)} MB) vượt quá giới hạn ${maxUploadMb} MB.`, 'error');
       return;
@@ -466,6 +541,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function clearSelectedFile() {
+    if (isVideoActive()) return;
     selectionVersion += 1;
     annotatedDataUrl = null;
     lastResultModel = null;
@@ -514,6 +590,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Sample image
   btnLoadSample.addEventListener('click', async () => {
+    if (isVideoActive()) return;
     try {
       const res = await fetch('/static/sample.jpg');
       if (!res.ok) throw new Error('Không tải được ảnh mẫu');
@@ -525,6 +602,327 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('Lỗi khi nạp ảnh mẫu.', 'error');
     }
   });
+
+  // ----------------------------------------------------
+  // Video upload, background-job status, and sampled output
+  // ----------------------------------------------------
+  function isVideoActive() {
+    return videoSubmitting || Boolean(videoJob && ['queued', 'processing', 'encoding'].includes(videoJob.state));
+  }
+
+  function videoUnavailableMessage() {
+    if (!['yolo11', 'anomalyclip'].includes(currentModel)) {
+      return 'Video hiện hỗ trợ YOLO11 (đếm case) và AnomalyCLIP (phân tích bất thường). Chọn một trong hai mô hình để tiếp tục.';
+    }
+    if (!lastHealth || !lastHealth.video) return 'Máy chủ chưa cung cấp chế độ video. Khởi động lại web sau khi cập nhật rồi tải lại trang.';
+    if (lastHealth.video.ready !== true) return 'Bộ xử lý video chưa sẵn sàng. Kiểm tra FFmpeg trên máy rồi tải lại trang.';
+    if (currentModel === 'anomalyclip' && !(lastHealth.anomalyclip && lastHealth.anomalyclip.ready === true)) {
+      return 'AnomalyCLIP chưa sẵn sàng. Hoàn tất cài đặt trọng số rồi tải lại trang.';
+    }
+    if (currentModel === 'yolo11' && lastHealth.ready !== true) return 'Chưa có trọng số YOLO11 để xử lý video.';
+    if (selectedVideoDuration !== null && Math.ceil(selectedVideoDuration * Number(videoSampleFps.value)) > maxVideoSamples) {
+      return `Video ở tốc độ lấy mẫu này vượt ${maxVideoSamples} frame. Giảm số frame mỗi giây hoặc chọn đoạn ngắn hơn.`;
+    }
+    return '';
+  }
+
+  function setVideoControlsLocked(locked) {
+    const fixedControls = [tabUpload, tabVideo, tabWebcam, tabSample, btnModelYolo, btnModelLoca,
+      btnModelDino, btnModelAnomaly, fileInput, btnRemoveImage, btnLoadSample,
+      videoFileInput, btnClearVideo, videoSampleFps, checkUseSplit, checkUseRoi];
+    fixedControls.forEach(control => { control.disabled = locked; });
+    document.querySelectorAll('.model-config-group input, .model-config-group select, .model-config-group button')
+      .forEach(control => { control.disabled = locked; });
+    if (!locked) {
+      checkUseSplit.disabled = currentModel === 'anomalyclip';
+      checkUseRoi.disabled = currentModel === 'anomalyclip';
+    }
+    videoDropZone.classList.toggle('is-locked', locked);
+    updateDetectButton();
+  }
+
+  function clearVideoSelection() {
+    if (isVideoActive()) return;
+    if (videoPollTimer !== null) clearTimeout(videoPollTimer);
+    videoPollTimer = null;
+    currentVideoFile = null;
+    selectedVideoDuration = null;
+    videoJob = null;
+    videoCancelling = false;
+    videoPollErrors = 0;
+    videoFileInput.value = '';
+    if (videoPreview.pause) videoPreview.pause();
+    if (videoResult.pause) videoResult.pause();
+    videoPreview.removeAttribute('src');
+    videoResult.removeAttribute('src');
+    if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
+    videoPreviewUrl = null;
+    videoPreviewBox.classList.add('hidden');
+    videoDropZone.classList.remove('hidden');
+    videoEmptyState.classList.remove('hidden');
+    videoJobProgress.classList.add('hidden');
+    videoCompletedResult.classList.add('hidden');
+    videoJobError.classList.add('hidden');
+    btnRetryVideoStatus.classList.add('hidden');
+    updateDetectButton();
+  }
+
+  function handleVideoSelect(file) {
+    if (!file || isVideoActive() || isProcessing) return;
+    if (!/\.(mp4|mov|avi|webm)$/i.test(file.name || '')) {
+      showToast('Chọn video MP4, MOV, AVI hoặc WEBM.', 'error');
+      return;
+    }
+    if (file.size < 1 || file.size > maxVideoBytes) {
+      showToast(`Chọn video không rỗng và tối đa ${Math.round(maxVideoBytes / 1024 / 1024)} MB.`, 'error');
+      return;
+    }
+    clearVideoSelection();
+    currentVideoFile = file;
+    videoPreviewUrl = URL.createObjectURL(file);
+    videoPreview.src = videoPreviewUrl;
+    videoFilename.textContent = file.name;
+    videoFilesize.textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB`;
+    videoPreviewBox.classList.remove('hidden');
+    videoDropZone.classList.add('hidden');
+    updateDetectButton();
+  }
+
+  videoFileInput.addEventListener('change', event => handleVideoSelect(event.target.files && event.target.files[0]));
+  btnClearVideo.addEventListener('click', () => {
+    if (isVideoActive()) return;
+    clearVideoSelection();
+    videoFileInput.click();
+  });
+  videoDropZone.addEventListener('keydown', event => {
+    if (event.target === videoFileInput) return;
+    if ((event.key === 'Enter' || event.key === ' ') && !isVideoActive()) {
+      event.preventDefault();
+      videoFileInput.click();
+    }
+  });
+  ['dragenter', 'dragover'].forEach(name => videoDropZone.addEventListener(name, event => {
+    event.preventDefault();
+    if (!isVideoActive()) videoDropZone.classList.add('dragover');
+  }));
+  ['dragleave', 'drop'].forEach(name => videoDropZone.addEventListener(name, event => {
+    event.preventDefault();
+    videoDropZone.classList.remove('dragover');
+  }));
+  videoDropZone.addEventListener('drop', event => handleVideoSelect(event.dataTransfer && event.dataTransfer.files[0]));
+  videoPreview.addEventListener('loadedmetadata', () => {
+    if (!currentVideoFile) return;
+    if (Number.isFinite(videoPreview.duration) && videoPreview.duration > maxVideoSeconds) {
+      clearVideoSelection();
+      showToast(`Video dài quá ${Math.round(maxVideoSeconds / 60)} phút. Chọn một đoạn ngắn hơn.`, 'error', 6500);
+      return;
+    }
+    if (Number.isFinite(videoPreview.duration)) {
+      selectedVideoDuration = videoPreview.duration;
+      videoFilesize.textContent = `${(currentVideoFile.size / 1024 / 1024).toFixed(1)} MB · ${videoPreview.duration.toFixed(1)} giây`;
+    }
+    updateDetectButton();
+  });
+  videoPreview.addEventListener('error', () => {
+    if (currentVideoFile) showToast('Trình duyệt chưa phát được bản gốc; vẫn có thể xử lý video.', 'info', 6500);
+  });
+  videoSampleFps.addEventListener('change', updateDetectButton);
+
+  function jobUrl(value, fallback) {
+    const url = value || fallback;
+    if (typeof url !== 'string' || !url.startsWith('/api/video/jobs/') || url.includes('..')) {
+      throw new Error('Máy chủ trả về đường dẫn video không hợp lệ.');
+    }
+    return url;
+  }
+
+  function renderVideoJob(job) {
+    const knownStates = ['queued', 'processing', 'encoding', 'done', 'error', 'cancelled'];
+    if (!job || !job.id || !knownStates.includes(job.state)) throw new Error('Trạng thái video không hợp lệ.');
+    if (videoJob && videoJob.id !== job.id) throw new Error('Trạng thái trả về không khớp video đang xử lý.');
+    if (videoJob && ['done', 'error', 'cancelled'].includes(videoJob.state)
+        && ['queued', 'processing', 'encoding'].includes(job.state)) return;
+    if (videoJob && ['queued', 'processing', 'encoding'].includes(job.state)
+        && Number(job.processed_frames) < Number(videoJob.processed_frames)) return;
+    videoJob = { ...videoJob, ...job };
+    const active = isVideoActive();
+    const stateNames = { queued: 'Đang chuẩn bị video…', processing: 'Đang phân tích các frame…',
+      encoding: 'Đang hoàn tất video MP4…', done: 'Video đã xử lý xong',
+      error: 'Chưa xử lý được video', cancelled: 'Đã dừng xử lý video' };
+    videoEmptyState.classList.add('hidden');
+    videoJobProgress.classList.remove('hidden');
+    videoJobState.textContent = stateNames[videoJob.state];
+    const progress = videoJob.state === 'done' ? 100 : Math.min(100, Math.max(0, Number(videoJob.progress) || 0));
+    videoProgressBar.value = progress;
+    const processed = Number(videoJob.processed_frames) || 0;
+    const total = Number(videoJob.total_frames) || 0;
+    videoJobDetail.textContent = total > 0
+      ? `${processed}/${total} frame lấy mẫu · ${Math.round(progress)}%`
+      : 'Đang đọc thông tin video…';
+    const metric = videoJob.last_metric;
+    videoLastMetric.textContent = '';
+    if (metric && Number.isFinite(metric.timestamp_seconds)) {
+      const prefix = `Frame tại ${metric.timestamp_seconds.toFixed(2)} giây`;
+      if (videoJob.model_type === 'anomalyclip' && Number.isFinite(metric.anomaly_score)) {
+        videoLastMetric.textContent = `${prefix} · Điểm bất thường: ${metric.anomaly_score.toFixed(3)}`;
+      } else if (Number.isFinite(metric.count)) {
+        videoLastMetric.textContent = `${prefix} · Số PC nhận diện: ${metric.count}`;
+      }
+    }
+    btnCancelVideo.classList.toggle('hidden', !active);
+    btnCancelVideo.disabled = videoCancelling;
+    btnCancelVideo.textContent = videoCancelling ? 'Đang dừng…' : 'Dừng xử lý';
+    videoJobError.classList.toggle('hidden', videoJob.state !== 'error');
+    if (videoJob.state === 'error') videoJobError.textContent = videoJob.error || 'Không xử lý được video. Vui lòng thử lại.';
+    if (!active) {
+      videoCancelling = false;
+      btnRetryVideoStatus.classList.add('hidden');
+    }
+    if (videoJob.state === 'done') {
+      videoResult.src = jobUrl(videoJob.result_url);
+      videoDownloadLink.href = jobUrl(videoJob.download_url, videoJob.result_url);
+      const modelName = videoJob.model_type === 'anomalyclip' ? 'AnomalyCLIP' : 'YOLO11';
+      videoResultSummary.textContent = `${modelName} · ${processed} frame đã phân tích · ${videoJob.sample_fps} frame/giây · Không có âm thanh`;
+      videoCompletedResult.classList.remove('hidden');
+      videoCsvLink.classList.toggle('hidden', !videoJob.csv_url);
+      if (videoJob.csv_url) videoCsvLink.href = jobUrl(videoJob.csv_url);
+    }
+    setVideoControlsLocked(active);
+    detectSpinner.classList.toggle('hidden', !active);
+    detectBtnText.textContent = active ? 'Đang xử lý video…' : actionLabel();
+  }
+
+  function scheduleVideoPoll() {
+    if (videoPollTimer !== null) clearTimeout(videoPollTimer);
+    if (isVideoActive() && !videoSubmitting) videoPollTimer = setTimeout(pollVideoJob, 1000);
+  }
+
+  async function pollVideoJob() {
+    videoPollTimer = null;
+    if (!videoJob || !isVideoActive() || videoSubmitting) return;
+    try {
+      const response = await fetch(jobUrl(videoJob.status_url, `/api/video/jobs/${videoJob.id}`));
+      if (response.status === 404) {
+        renderVideoJob({ ...videoJob, state: 'error', error: 'Không còn tìm thấy công việc này. Máy chủ có thể đã khởi động lại; hãy gửi lại video.' });
+        return;
+      }
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Không nhận được trạng thái video.');
+      videoPollErrors = 0;
+      videoJobError.classList.add('hidden');
+      btnRetryVideoStatus.classList.add('hidden');
+      renderVideoJob(data);
+      scheduleVideoPoll();
+    } catch (error) {
+      videoPollErrors += 1;
+      if (videoPollErrors < 3) {
+        scheduleVideoPoll();
+      } else {
+        videoJobState.textContent = 'Chưa nhận được trạng thái mới';
+        videoJobError.textContent = 'Video có thể vẫn đang chạy trên máy. Kiểm tra lại kết nối rồi bấm kiểm tra trạng thái; không cần gửi lại ngay.';
+        videoJobError.classList.remove('hidden');
+        btnRetryVideoStatus.classList.remove('hidden');
+      }
+    }
+  }
+
+  btnRetryVideoStatus.addEventListener('click', () => {
+    if (!videoJob || !isVideoActive()) return;
+    videoPollErrors = 0;
+    videoJobError.classList.add('hidden');
+    btnRetryVideoStatus.classList.add('hidden');
+    pollVideoJob();
+  });
+
+  btnCancelVideo.addEventListener('click', async () => {
+    if (!videoJob || !isVideoActive() || videoCancelling) return;
+    videoCancelling = true;
+    btnCancelVideo.disabled = true;
+    btnCancelVideo.textContent = 'Đang dừng…';
+    try {
+      const response = await fetch(`/api/video/jobs/${encodeURIComponent(videoJob.id)}/cancel`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Chưa dừng được video.');
+      renderVideoJob(data);
+      scheduleVideoPoll();
+    } catch (error) {
+      videoCancelling = false;
+      btnCancelVideo.disabled = false;
+      btnCancelVideo.textContent = 'Dừng xử lý';
+      showToast(error.message || 'Chưa kết nối được để dừng video.', 'error', 6500);
+    }
+  });
+
+  async function performVideoDetection() {
+    if (isVideoActive() || isProcessing || !currentVideoFile) return;
+    const issue = videoUnavailableMessage();
+    if (issue) {
+      showToast(issue, 'error', 6500);
+      checkHealth();
+      return;
+    }
+    if (videoPollTimer !== null) clearTimeout(videoPollTimer);
+    videoPollTimer = null;
+    videoJob = null;
+    videoSubmitting = true;
+    videoCancelling = false;
+    videoPollErrors = 0;
+    videoPreview.pause();
+    videoResult.pause();
+    videoCompletedResult.classList.add('hidden');
+    videoEmptyState.classList.add('hidden');
+    videoJobProgress.classList.remove('hidden');
+    videoJobError.classList.add('hidden');
+    btnRetryVideoStatus.classList.add('hidden');
+    btnCancelVideo.classList.add('hidden');
+    videoJobState.textContent = 'Đang tải video lên…';
+    videoJobDetail.textContent = 'Đang gửi video đến máy chủ trên máy này.';
+    videoLastMetric.textContent = '';
+    videoProgressBar.value = 0;
+    setVideoControlsLocked(true);
+    detectSpinner.classList.remove('hidden');
+    detectBtnText.textContent = 'Đang tải video lên…';
+
+    const formData = new FormData();
+    formData.append('video', currentVideoFile, currentVideoFile.name);
+    formData.append('model_type', currentModel);
+    formData.append('sample_fps', videoSampleFps.value);
+    if (currentModel === 'anomalyclip') {
+      formData.append('anomaly_imgsz', anomalyImgszSelect.value);
+      formData.append('anomaly_opacity', anomalyOpacityRange.value);
+    } else if (currentModel === 'grounding_dino') {
+      formData.append('dino_prompt', (dinoPromptInput && dinoPromptInput.value.trim()) || 'pc case');
+      formData.append('dino_box_thresh', dinoBoxThreshRange ? dinoBoxThreshRange.value : '0.35');
+      formData.append('dino_text_thresh', '0.25');
+    } else if (currentModel === 'loca') {
+      formData.append('loca_mode', locaMode || 'zero_shot');
+    } else {
+      formData.append('confidence', confidenceRange.value);
+      formData.append('imgsz', imgszSelect.value);
+      formData.append('nms_iou', yoloNmsRange.value);
+      formData.append('sliced', checkSliced.checked ? 'true' : 'false');
+      formData.append('enhance', checkEnhance.checked ? 'true' : 'false');
+      formData.append('use_split', checkUseSplit.checked ? 'true' : 'false');
+      formData.append('use_roi', checkUseRoi.checked ? 'true' : 'false');
+    }
+    try {
+      const response = await fetch('/api/video/jobs', { method: 'POST', body: formData });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Không gửi được video để xử lý.');
+      videoSubmitting = false;
+      renderVideoJob(data);
+      scheduleVideoPoll();
+    } catch (error) {
+      videoSubmitting = false;
+      videoJob = null;
+      setVideoControlsLocked(false);
+      detectSpinner.classList.add('hidden');
+      detectBtnText.textContent = actionLabel();
+      videoJobState.textContent = 'Chưa gửi được video';
+      videoJobError.textContent = error.message || 'Không kết nối được máy chủ video. Vui lòng thử lại.';
+      videoJobError.classList.remove('hidden');
+    }
+  }
 
   // ----------------------------------------------------
   // Canvas Sizing & Drawing for Exemplars
@@ -712,7 +1110,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  btnDetect.addEventListener('click', performDetection);
+  btnDetect.addEventListener('click', () => activeInput === 'video' ? performVideoDetection() : performDetection());
 
   // ----------------------------------------------------
   // Render Results

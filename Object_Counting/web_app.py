@@ -16,6 +16,7 @@ from io import BytesIO
 import json
 import math
 from pathlib import Path
+from tempfile import SpooledTemporaryFile
 import threading
 import time
 from urllib.parse import urlsplit
@@ -31,6 +32,8 @@ from object_counting.cli import ROOT
 from object_counting.detection import CaseDetector
 from object_counting.anomalyclip import AnomalyCLIPDetector, asset_status as anomalyclip_asset_status
 from object_counting.anomaly_visualizer import render_anomaly_heatmap
+from object_counting.video_jobs import VideoJobManager
+from object_counting.video_routes import MAX_VIDEO_UPLOAD_BYTES, MAX_VIDEO_UPLOAD_MB, VIDEO_MODELS, VIDEO_SAMPLE_FPS, register_video_routes
 from object_counting.loca_detector import LOCADetector
 from object_counting.grounding_dino.detector import GroundingDinoDetector, format_text_prompt
 from object_counting.grounding_dino.visualizer import annotate_image as dino_annotate_image
@@ -61,8 +64,30 @@ def resolve_default_weights():
 class MemoryUploadRequest(Request):
     """Keep bounded uploads in memory instead of Werkzeug's disk spool."""
 
+    @property
+    def max_form_memory_size(self):
+        if self.path.startswith("/api/video/"):
+            return None
+        return super().max_form_memory_size
+
+    @max_form_memory_size.setter
+    def max_form_memory_size(self, value):
+        pass
+
+    @property
+    def max_content_length(self):
+        if self.path.startswith("/api/video/"):
+            return MAX_VIDEO_UPLOAD_BYTES + 128 * 1024
+        return super().max_content_length
+
+    @max_content_length.setter
+    def max_content_length(self, value):
+        pass
+
     def _get_file_stream(self, total_content_length, content_type, filename=None,
                          content_length=None):
+        if self.path.startswith("/api/video/"):
+            return SpooledTemporaryFile(max_size=4 * 1024 * 1024, mode="w+b")
         return BytesIO()
 
 
@@ -114,7 +139,8 @@ def _default_anomaly_factory(models_dir):
 
 
 def create_app(detector_factory=None, weights=None, default_imgsz=960,
-               anomaly_factory=None, anomaly_models_dir=None):
+               anomaly_factory=None, anomaly_models_dir=None,
+               video_manager_factory=None, video_output_root=None):
     """Create the service; an injected factory receives the weights Path once."""
     app = Flask(__name__, static_folder=str(ROOT / "web"), static_url_path="/static")
     app.request_class = MemoryUploadRequest
@@ -139,6 +165,48 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960,
     loca_zero_path = ROOT / "models" / "loca_zero_shot.pth"
     loca_few_path = ROOT / "models" / "loca_few_shot.pth"
 
+    def process_video_frame(frame, options):
+        nonlocal detector, loca_detector, dino_detector, anomaly_detector
+        started = time.perf_counter()
+        with inference_lock:
+            if options["model_type"] == "anomalyclip":
+                if anomaly_detector is None:
+                    detector, loca_detector, dino_detector = None, None, None
+                    gc.collect()
+                    anomaly_detector = anomaly_model_factory(anomaly_directory)
+                anomaly_detector.image_size = options["anomaly_imgsz"]
+                analysis = anomaly_detector.analyze(frame)
+                score = float(analysis["anomaly_score"])
+                if not math.isfinite(score) or not 0 <= score <= 1:
+                    raise ValueError("Invalid anomaly score.")
+                canvas, _, _ = render_anomaly_heatmap(frame, analysis["anomaly_map"], options["anomaly_opacity"])
+                import cv2
+                cv2.putText(canvas, f"AnomalyCLIP score: {score:.3f}", (12, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+                return canvas, {"anomaly_score": score,
+                                "inference_ms": round((time.perf_counter() - started) * 1000, 1)}
+            if not weights_path.is_file():
+                raise RuntimeError("Chưa tìm thấy trọng số YOLO.")
+            if anomaly_detector is not None:
+                anomaly_detector = None
+                gc.collect()
+            if detector is None:
+                detector = factory(weights_path)
+            for key in ("confidence", "imgsz", "nms_iou", "sliced", "use_roi", "use_split"):
+                setattr(detector, key, options[key])
+            detector.enhance_contrast = options["enhance"]
+            detections = detector.detect(frame)
+            return annotate(frame, detections), {
+                "count": len(detections), "inference_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+
+    video_root = Path(video_output_root) if video_output_root is not None else ROOT / "outputs/video_jobs"
+    manager_factory = video_manager_factory or VideoJobManager
+    video_manager = manager_factory(video_root, process_video_frame)
+    app.extensions["video_jobs"] = video_manager
+    register_video_routes(app, video_manager, video_root,
+                          lambda: anomalyclip_asset_status(anomaly_directory), default_imgsz)
+
     @app.after_request
     def response_headers(response):
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -147,6 +215,7 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960,
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; connect-src 'self'; "
+            "media-src 'self' blob:; "
             "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
         )
         if request.path.startswith("/api/"):
@@ -155,6 +224,8 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960,
 
     @app.errorhandler(RequestEntityTooLarge)
     def upload_too_large(error):
+        if request.path.startswith("/api/video/"):
+            return jsonify(error=f"Video tải lên quá lớn. Giới hạn là {MAX_VIDEO_UPLOAD_MB} MB."), 413
         return jsonify(error=f"Ảnh tải lên quá lớn. Giới hạn là {MAX_UPLOAD_MB} MB."), 413
 
     @app.errorhandler(BadRequest)
@@ -175,18 +246,22 @@ def create_app(detector_factory=None, weights=None, default_imgsz=960,
             "max_upload_mb": MAX_UPLOAD_MB,
             "default_imgsz": default_imgsz,
         }
-        if not app.config.get("TESTING"):
-            data["anomalyclip"] = {
-                "ready": anomaly_assets["ready"],
-                "missing_assets": anomaly_assets["missing_assets"],
-                "device": get_device_name(),
-                "default_imgsz": 336,
-            }
+        data["anomalyclip"] = {
+            "ready": anomaly_assets["ready"], "missing_assets": anomaly_assets["missing_assets"],
+            "device": get_device_name(), "default_imgsz": 336,
+        }
+        data["video"] = {
+            "ready": video_manager.ffmpeg_available, "supported_models": list(VIDEO_MODELS),
+            "max_upload_mb": MAX_VIDEO_UPLOAD_MB, "max_duration_seconds": 300,
+            "max_sampled_frames": 600, "sample_fps": list(VIDEO_SAMPLE_FPS),
+        }
         return jsonify(data)
 
     @app.post("/api/detect")
     def detect():
         nonlocal detector, loca_detector, dino_detector, anomaly_detector
+        if video_manager.is_busy():
+            return jsonify(error="Đang xử lý video. Hãy chờ hoàn tất hoặc hủy video trước khi phân tích ảnh."), 409
         origin = request.headers.get("Origin")
         if origin:
             parsed_origin = urlsplit(origin)
